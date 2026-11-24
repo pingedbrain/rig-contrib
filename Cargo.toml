@@ -35,3 +35,4 @@ rig-agent = { version = "0.47", default-features = false, features = ["test-util
 rig-rmcp = "0.47"
 rmcp = { version = "3.11", features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+http = "1"

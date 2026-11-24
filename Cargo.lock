@@ -1509,6 +1509,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "futures",
+ "http",
  "reqwest",
  "rig-agent",
  "rig-core",

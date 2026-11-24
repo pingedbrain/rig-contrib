@@ -388,3 +388,33 @@ async fn a_run_past_its_time_is_stopped() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_rate_limited_provider_is_reported_so_the_caller_can_retry() -> anyhow::Result<()> {
+    // Every attempt (the first and two retries) is rate limited.
+    let model = MockCompletionModel::from_turns((0..3).map(|attempt| {
+        MockTurn::provider_response_error(
+            http::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":{"message":"upstream rate limited","internal":"do-not-leak"}}"#,
+            format!("req-{attempt}"),
+        )
+    }));
+    // A typed agent awaits its run, so the failure arrives as the provider's
+    // own error (a streamed run reports it instead; see the unit tests).
+    let agent = AgentBuilder::new(model).name("Helper").build();
+    let (client, _) = connect(McpServer::new("test").typed_agent::<Task>(agent)).await?;
+    let result = client
+        .call_tool(call("helper", json!({"message": "hi"})))
+        .await?;
+    let text = format!("{:?}", result.content);
+    ensure!(result.is_error == Some(true), "{result:?}");
+    ensure!(
+        text.contains("rate limiting"),
+        "the caller learns it may retry: {text}"
+    );
+    ensure!(
+        !text.contains("do-not-leak"),
+        "the provider's own text stays out: {text}"
+    );
+    Ok(())
+}

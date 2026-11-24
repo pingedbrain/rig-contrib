@@ -8,6 +8,7 @@ use futures::StreamExt;
 use futures::future::BoxFuture;
 use rig_agent::Agent;
 use rig_agent::agent::MultiTurnStreamItem;
+use rig_agent::completion::{PromptError, StructuredOutputError};
 use rig_core::message::Message;
 use rig_core::serve::adapters::ToolAdapter;
 use rig_core::streaming::{Item, StreamEvent};
@@ -172,7 +173,14 @@ impl McpServer {
                     .history(history)
                     .retries(2)
                     .await
-                    .map_err(|error| error.to_string())?;
+                    .map_err(|error| {
+                        tracing::warn!(%error, "typed agent call failed");
+                        match &error {
+                            StructuredOutputError::Prompt(prompt) => failure_message(prompt),
+                            _ => "The agent could not produce a structured answer.",
+                        }
+                        .to_owned()
+                    })?;
                 let value =
                     serde_json::to_value(&response.output).map_err(|error| error.to_string())?;
                 Ok((value, response.messages))
@@ -437,10 +445,7 @@ impl Handler {
             };
             return Ok(match outcome {
                 Err(_) => error("The agent run took longer than allowed."),
-                Ok(Err(failure)) => {
-                    tracing::warn!(parent: &span, %failure, "typed agent call failed");
-                    error("The agent could not produce a structured answer.")
-                }
+                Ok(Err(message)) => error(&message),
                 Ok(Ok((value, messages))) => {
                     self.save(&session, messages, &span).await;
                     let mut result = CallToolResult::success(vec![
@@ -496,7 +501,7 @@ impl Handler {
                 Ok(_) => {}
                 Err(failure) => {
                     tracing::warn!(parent: &span, %failure, "agent call failed");
-                    return Ok(error("The agent run failed."));
+                    return Ok(error(failure_message(&failure)));
                 }
             }
         }
@@ -508,6 +513,40 @@ impl Handler {
         if let Err(failure) = self.0.server.history.append(session, messages).await {
             tracing::warn!(parent: span, %failure, "could not save the session");
         }
+    }
+}
+
+/// What the calling model is told when a run fails: enough to decide whether
+/// to retry, without the provider's own error text (which can name internals).
+///
+/// A failure arrives as the provider's error from an awaited run, or as its
+/// report from a streamed one; both carry the status and whether to retry.
+fn failure_message(failure: &PromptError) -> &'static str {
+    let (status, retryable) = match failure {
+        PromptError::Provider(provider) => (
+            failure
+                .provider_response_status()
+                .map(|status| status.as_u16()),
+            provider.is_retryable(),
+        ),
+        PromptError::Report(report) => (
+            report.http_status.or(report
+                .provider_response_status()
+                .map(|status| status.as_u16())),
+            report.retryable,
+        ),
+        PromptError::MaxTurns { .. } => {
+            return "The agent used up its turns without finishing.";
+        }
+        _ => (None, false),
+    };
+    match status {
+        Some(429) => "The model provider is rate limiting this server; try again in a moment.",
+        Some(401 | 403) => "The model provider rejected this server's credentials.",
+        Some(500..=599) => "The model provider is unavailable right now; try again shortly.",
+        Some(_) => "The model provider rejected the request.",
+        None if retryable => "The model provider could not be reached; try again shortly.",
+        None => "The agent run failed.",
     }
 }
 
@@ -576,7 +615,30 @@ pub(crate) fn tool_name(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::tool_name;
+    use rig_agent::completion::PromptError;
+    use rig_core::error::{ErrorKind, ErrorReport};
+
+    use super::{failure_message, tool_name};
+
+    #[test]
+    fn streamed_failures_are_classified_by_status_and_retryability() {
+        let report = |status: Option<u16>, retryable: bool| {
+            let mut report = ErrorReport::new(ErrorKind::ProviderResponse, "upstream said no")
+                .with_retryable(retryable);
+            if let Some(status) = status {
+                report = report.with_http_status(status);
+            }
+            PromptError::Report(report)
+        };
+        assert!(failure_message(&report(Some(429), true)).contains("rate limiting"));
+        assert!(failure_message(&report(Some(401), false)).contains("credentials"));
+        assert!(failure_message(&report(Some(503), true)).contains("unavailable"));
+        assert!(failure_message(&report(None, true)).contains("could not be reached"));
+        assert_eq!(
+            failure_message(&report(None, false)),
+            "The agent run failed."
+        );
+    }
 
     #[test]
     fn agent_names_become_provider_safe_tool_names() {
