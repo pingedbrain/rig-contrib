@@ -1,0 +1,37 @@
+[package]
+name = "rig-mcp-server"
+version = "0.47.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+readme = "README.md"
+description = "Serve Rig agents and tools over the Model Context Protocol (MCP): agents as tools with sessions, streamed progress and cancellation; typed agents with structured output; stdio and Streamable HTTP."
+repository = "https://github.com/pingedbrain/rig-mcp-server"
+keywords = ["rig", "mcp", "agents", "llm", "model-context-protocol"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[dependencies]
+axum = "0.8"
+base64 = "0.22"
+futures = "0.3"
+rig-agent = { version = "0.47", default-features = false }
+rig-core = { version = "0.47", default-features = false }
+rig-memory = { version = "0.47", default-features = false }
+rmcp = { version = "3.11", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.54.1", features = ["sync", "time", "macros", "rt"] }
+tokio-util = "0.7"
+tracing = "0.1"
+uuid = { version = "1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+anyhow = "1.0.105"
+tokio = { version = "1.54.1", features = ["full"] }
+rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
+rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-rmcp = "0.47"
+rmcp = { version = "3.11", features = ["client", "transport-streamable-http-client-reqwest"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
