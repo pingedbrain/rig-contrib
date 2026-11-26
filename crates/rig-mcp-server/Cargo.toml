@@ -10,13 +10,20 @@ repository.workspace = true
 keywords = ["rig", "mcp", "agents", "llm", "model-context-protocol"]
 categories = ["network-programming", "web-programming::http-server"]
 
+[features]
+# Continue a client's trace (W3C trace context from HTTP headers or the
+# request's `_meta`) and give agent calls a `session.id`, through rig-otel.
+otel = ["dep:rig-otel", "dep:opentelemetry", "dep:tracing-opentelemetry"]
+
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
 futures = "0.3"
+opentelemetry = { version = "0.32", optional = true }
 rig-agent = { version = "0.47", default-features = false }
 rig-core = { version = "0.47", default-features = false }
 rig-memory = { version = "0.47", default-features = false }
+rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false, optional = true }
 rmcp = { version = "3.11", default-features = false, features = ["server", "macros", "transport-io", "transport-streamable-http-server"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
@@ -25,6 +32,7 @@ thiserror = "2"
 tokio = { version = "1.54.1", features = ["sync", "time", "macros", "rt"] }
 tokio-util = "0.7"
 tracing = "0.1"
+tracing-opentelemetry = { version = "0.33", optional = true }
 uuid = { version = "1.29.3", features = ["v4"] }
 
 [dev-dependencies]
@@ -36,6 +44,7 @@ rig-rmcp = "0.47"
 rmcp = { version = "3.11", features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 http = "1"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 
 [lints]
 workspace = true

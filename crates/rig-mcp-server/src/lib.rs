@@ -34,6 +34,8 @@
 
 mod content;
 mod history;
+#[cfg(feature = "otel")]
+mod otel;
 mod server;
 mod transport;
 

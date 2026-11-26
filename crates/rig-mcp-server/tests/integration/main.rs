@@ -2,3 +2,5 @@
 //! one binary.
 
 mod mcp;
+#[cfg(feature = "otel")]
+mod otel;

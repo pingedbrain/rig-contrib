@@ -75,6 +75,23 @@ Every call to an agent spends model tokens, so a server bounds them:
 Each agent call runs in an `mcp.agent_call` tracing span (with `mcp.session_id`); Rig's
 spans for the model calls and tools nest under it.
 
+## Tracing
+
+With the `otel` feature (through [`rig-otel`](https://crates.io/crates/rig-otel), no exporters of its own), a
+call continues the client's trace, so the client, the `mcp.agent_call` span and Rig's
+model and tool spans under it make one trace. The W3C `traceparent`, `tracestate` and
+`baggage` are read from the HTTP request headers (Streamable HTTP), else from the
+request's `_meta` (any transport, stdio too; the SEP-414 convention). Plain tools run in an
+`mcp.tool_call` span that continues the trace the same way.
+
+Every span of an agent call carries `session.id`: the
+`X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header when AWS Bedrock AgentCore Runtime
+sends one, else the call's own `session_id`. Export the spans with `rig_otel::init()`.
+
+```toml
+rig-mcp-server = { version = "0.47", features = ["otel"] }
+```
+
 ## Testing
 
 `cargo test` drives the server with the official `rmcp` client in memory: listing,

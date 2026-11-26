@@ -14,7 +14,7 @@ use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use serde_json::{Value, json};
 
 /// A plain Rig tool: adds two numbers, read-only.
-struct Add;
+pub(crate) struct Add;
 
 impl Tool for Add {
     const NAME: &'static str = "add";
@@ -54,7 +54,7 @@ struct Task {
     priority: String,
 }
 
-fn streaming_agent(name: &str, replies: &[&[&str]]) -> (Agent, MockCompletionModel) {
+pub(crate) fn streaming_agent(name: &str, replies: &[&[&str]]) -> (Agent, MockCompletionModel) {
     let model = MockCompletionModel::from_stream_turns(replies.iter().map(|chunks| {
         chunks
             .iter()
@@ -71,7 +71,7 @@ fn streaming_agent(name: &str, replies: &[&[&str]]) -> (Agent, MockCompletionMod
 
 /// Collects the progress messages it is sent.
 #[derive(Clone, Default)]
-struct Client {
+pub(crate) struct Client {
     progress: Arc<Mutex<Vec<String>>>,
 }
 
@@ -90,7 +90,7 @@ impl ClientHandler for Client {
     }
 }
 
-async fn connect(
+pub(crate) async fn connect(
     server: McpServer,
 ) -> anyhow::Result<(RunningService<RoleClient, Client>, Client)> {
     let (server_side, client_side) = tokio::io::duplex(64 * 1024);
@@ -99,7 +99,7 @@ async fn connect(
     Ok((client.clone().serve(client_side).await?, client))
 }
 
-fn call(name: &str, args: Value) -> CallToolRequestParams {
+pub(crate) fn call(name: &str, args: Value) -> CallToolRequestParams {
     let mut params = CallToolRequestParams::new(name.to_owned());
     params.arguments = args.as_object().cloned();
     params

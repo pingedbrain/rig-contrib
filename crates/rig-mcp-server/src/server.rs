@@ -382,10 +382,19 @@ impl ServerHandler for Handler {
         };
         let result = match &entry.kind {
             // A tool's own failure is a result the model reads, not a protocol error.
-            Kind::Tool(run) => match run(args).await {
-                Ok(output) => tool_result(output),
-                Err(failure) => error(&failure.to_string()),
-            },
+            Kind::Tool(run) => {
+                let run = run(args);
+                #[cfg(feature = "otel")]
+                let run = {
+                    let span = tracing::info_span!("mcp.tool_call", mcp.tool = %request.name);
+                    crate::otel::Incoming::of(&context).continue_in(&span, None);
+                    tracing::Instrument::instrument(run, span)
+                };
+                match run.await {
+                    Ok(output) => tool_result(output),
+                    Err(failure) => error(&failure.to_string()),
+                }
+            }
             Kind::Agent(agent, typed) => {
                 self.call_agent(agent, typed.as_ref(), args, &context)
                     .await?
@@ -423,6 +432,8 @@ impl Handler {
             ));
         }
         let span = tracing::info_span!("mcp.agent_call", mcp.session_id = %session);
+        #[cfg(feature = "otel")]
+        crate::otel::Incoming::of(context).continue_in(&span, Some(&session));
         let prior = match server.history.load(&session).await {
             Ok(messages) => view(&messages, server.window.as_ref())
                 .iter()
