@@ -149,8 +149,10 @@ async fn an_invocation_continues_the_trace_and_names_the_session() {
     // first. A second, no-op dispatcher alive meanwhile turns that shortcut off.
     let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let guard = tracing::subscriber::set_default(subscriber);
-    let agent = AgentBuilder::new(MockCompletionModel::text("ok")).build();
-    let url = serve(AgentCoreApp::new(agent)).await;
+    let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
+        .name("helper")
+        .build();
+    let url = serve(AgentCoreApp::new(agent).record_content(true)).await;
     let trace = TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap();
     let caller = SpanContext::new(
         trace,
@@ -177,10 +179,30 @@ async fn an_invocation_continues_the_trace_and_names_the_session() {
     let finished = spans.get_finished_spans().unwrap();
     let invocation = finished
         .iter()
-        .find(|span| span.name == "agentcore.invocation")
+        .find(|span| span.name.starts_with("invoke_agent"))
         .expect("invocation span");
     assert_eq!(invocation.span_context.trace_id(), trace);
     assert_eq!(invocation.parent_span_id, caller.span_id());
+    // What AgentCore Evaluations reads from the run's span.
+    let attribute = |key: &str| {
+        invocation
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.to_string())
+    };
+    assert_eq!(invocation.name, "invoke_agent helper");
+    assert_eq!(
+        attribute("gen_ai.operation.name").as_deref(),
+        Some("invoke_agent")
+    );
+    assert_eq!(attribute("gen_ai.agent.name").as_deref(), Some("helper"));
+    assert_eq!(attribute("gen_ai.task.input").as_deref(), Some("hi"));
+    assert_eq!(attribute("gen_ai.task.output").as_deref(), Some("ok"));
+    assert_eq!(
+        attribute("agentcore.invocation.agent_response").as_deref(),
+        Some("ok")
+    );
     for span in &finished {
         let session = span
             .attributes

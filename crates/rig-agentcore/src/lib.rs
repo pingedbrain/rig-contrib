@@ -210,11 +210,29 @@ async fn invoke(
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map_or_else(sessions::local_id, str::to_owned);
+    // The invocation is the agent run AgentCore Evaluations looks for: an
+    // `invoke_agent` span (Rig adopts it as the run's span, so it makes none
+    // of its own), with the prompt and the answer when content is recorded.
+    let agent_name = app.inner.agent.name().unwrap_or("agent").to_owned();
     let span = tracing::info_span!(
         "agentcore.invocation",
+        otel.name = %format!("invoke_agent {agent_name}"),
         otel.kind = "server",
         agentcore.session_id = %session,
+        gen_ai.operation.name = "invoke_agent",
+        gen_ai.agent.name = %agent_name,
+        gen_ai.task.input = tracing::field::Empty,
+        gen_ai.task.output = tracing::field::Empty,
+        agentcore.invocation.user_prompt = tracing::field::Empty,
+        agentcore.invocation.agent_response = tracing::field::Empty,
     );
+    if app.inner.record_content {
+        span.record("gen_ai.task.input", invocation.prompt.as_str());
+        span.record(
+            "agentcore.invocation.user_prompt",
+            invocation.prompt.as_str(),
+        );
+    }
     // Without an OpenTelemetry layer there is nothing to continue: fine.
     let _ = rig_otel::set_session(&span, session.clone(), Some(rig_otel::extract(&headers)));
 
@@ -244,7 +262,9 @@ async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
     match run {
         Ok(response) => {
             inner.sessions.append(&session, response.messages.clone());
-            Json(json!({"response": response.output(), "status": "success"})).into_response()
+            let answer = response.output();
+            record_answer(inner.record_content, &answer);
+            Json(json!({"response": answer, "status": "success"})).into_response()
         }
         Err(failure) => {
             tracing::warn!(error = %failure, "agent run failed");
@@ -276,7 +296,9 @@ fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Spa
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                         inner.sessions.append(&session, response.messages.clone());
-                        let _ = sender.send(json!({"response": response.output()}));
+                        let answer = response.output();
+                        record_answer(inner.record_content, &answer);
+                        let _ = sender.send(json!({"response": answer}));
                         return;
                     }
                     Ok(_) => {}
@@ -299,6 +321,15 @@ fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Spa
         ))
     });
     Sse::new(events).into_response()
+}
+
+/// Record the agent's answer on the invocation span, the current one.
+fn record_answer(record_content: bool, answer: &str) {
+    if record_content {
+        let span = tracing::Span::current();
+        span.record("gen_ai.task.output", answer);
+        span.record("agentcore.invocation.agent_response", answer);
+    }
 }
 
 fn error(status: StatusCode, message: &str) -> Response {
