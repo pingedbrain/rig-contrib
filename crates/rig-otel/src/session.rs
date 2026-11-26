@@ -23,7 +23,15 @@ pub fn set_session(
     parent: Option<Context>,
 ) -> Result<(), SetParentError> {
     let parent = parent.unwrap_or_default();
-    let cx = parent.with_baggage([KeyValue::new(SESSION_ID, id.into())]);
+    // Keep the baggage the caller sent; only the session is this process's.
+    let mut entries: Vec<KeyValue> = parent
+        .baggage()
+        .iter()
+        .filter(|(key, _)| key.as_str() != SESSION_ID)
+        .map(|(key, (value, _))| KeyValue::new(key.clone(), value.clone()))
+        .collect();
+    entries.push(KeyValue::new(SESSION_ID, id.into()));
+    let cx = parent.with_baggage(entries);
     span.set_parent(cx)
 }
 

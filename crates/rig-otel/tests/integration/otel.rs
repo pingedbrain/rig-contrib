@@ -265,3 +265,31 @@ async fn a_trace_and_its_session_cross_into_another_process() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_session_keeps_the_rest_of_the_callers_baggage() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        "baggage",
+        http::HeaderValue::from_static("tenant=acme,session.id=old"),
+    );
+    let mut forwarded = http::HeaderMap::new();
+    capture(|| async {
+        let span = tracing::info_span!("handle request");
+        rig_otel::set_session(&span, "new", Some(rig_otel::extract(&headers))).unwrap();
+        let _entered = span.enter();
+        rig_otel::inject(&mut forwarded);
+    })
+    .await;
+
+    let baggage = forwarded
+        .get("baggage")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    assert!(baggage.contains("tenant=acme"), "{baggage}");
+    assert!(
+        baggage.contains("session.id=new") && !baggage.contains("old"),
+        "{baggage}"
+    );
+}
