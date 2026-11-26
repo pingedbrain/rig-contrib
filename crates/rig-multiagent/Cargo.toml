@@ -22,6 +22,9 @@ tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
 rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }

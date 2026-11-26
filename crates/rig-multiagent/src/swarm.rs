@@ -374,14 +374,70 @@ impl Trail {
     }
 }
 
+/// The span a swarm run is in. Its totals are recorded when the run ends:
+/// tokens under `swarm.usage.*` (not `gen_ai.usage.*`, which the model calls
+/// under it carry, so backends do not count them twice).
+fn run_span(entry: &str, run_id: Option<&str>) -> tracing::Span {
+    tracing::info_span!(
+        "swarm.run",
+        swarm.entry = %entry,
+        swarm.run_id = run_id,
+        swarm.agent = tracing::field::Empty,
+        swarm.handoffs = tracing::field::Empty,
+        swarm.usage.input_tokens = tracing::field::Empty,
+        swarm.usage.output_tokens = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+    )
+}
+
+/// Record how a run ended on its span.
+fn record_outcome(span: &tracing::Span, outcome: &Result<SwarmRun, SwarmError>) {
+    let (handoffs, usage) = match outcome {
+        Ok(run) => (run.handoffs.len(), run.usage),
+        Err(error) => (error.handoffs.len(), error.usage),
+    };
+    span.record("swarm.handoffs", handoffs);
+    if let Some(tokens) = usage.input_tokens {
+        span.record("swarm.usage.input_tokens", tokens);
+    }
+    if let Some(tokens) = usage.output_tokens {
+        span.record("swarm.usage.output_tokens", tokens);
+    }
+    match outcome {
+        Ok(run) => {
+            span.record("swarm.agent", run.agent.as_str());
+        }
+        Err(error) => {
+            span.record("otel.status_code", "ERROR");
+            span.record("error.type", error.reason.kind());
+        }
+    }
+}
+
+impl SwarmFailure {
+    /// A short, stable name for the failure, for `error.type`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Agent { .. } => "agent_failed",
+            Self::Timeout { .. } => "timeout",
+            Self::MaxHandoffs { .. } => "max_handoffs",
+            Self::Repetitive { .. } => "repetitive_handoffs",
+            Self::Checkpoint { .. } => "checkpoint",
+        }
+    }
+}
+
 impl Swarm {
     /// Run the swarm on `task` until an agent answers.
     pub async fn run(&self, task: impl Into<String>) -> Result<SwarmRun, SwarmError> {
-        let entry = &self.inner.entry.name;
-        let span = tracing::info_span!("swarm.run", swarm.entry = %entry);
-        self.run_task(task.into(), None, false, None)
-            .instrument(span)
-            .await
+        let span = run_span(&self.inner.entry.name, None);
+        let outcome = self
+            .run_task(task.into(), None, false, None)
+            .instrument(span.clone())
+            .await;
+        record_outcome(&span, &outcome);
+        outcome
     }
 
     /// Run the swarm as run `run_id`: resume it from its last checkpoint if
@@ -399,11 +455,13 @@ impl Swarm {
         run_id: &str,
         task: impl Into<String>,
     ) -> Result<SwarmRun, SwarmError> {
-        let entry = &self.inner.entry.name;
-        let span = tracing::info_span!("swarm.run", swarm.entry = %entry, swarm.run_id = %run_id);
-        self.run_task(task.into(), self.saving(Some(run_id)), false, None)
-            .instrument(span)
-            .await
+        let span = run_span(&self.inner.entry.name, Some(run_id));
+        let outcome = self
+            .run_task(task.into(), self.saving(Some(run_id)), false, None)
+            .instrument(span.clone())
+            .await;
+        record_outcome(&span, &outcome);
+        outcome
     }
 
     /// Run the swarm on `task`, reporting each turn, the text its model
@@ -449,17 +507,18 @@ impl Swarm {
         task: String,
         run_id: Option<&'a str>,
     ) -> WasmBoxedStream<'a, SwarmEvent> {
-        let entry = self.inner.entry.name.clone();
+        let span = run_span(&self.inner.entry.name, run_id);
         events(
-            move |sender| {
-                async move {
-                    let emit = move |event| {
-                        let _ = sender.send(event);
-                    };
-                    self.run_task(task, self.saving(run_id), false, Some(&emit))
-                        .await
-                }
-                .instrument(tracing::info_span!("swarm.run", swarm.entry = %entry))
+            move |sender| async move {
+                let emit = move |event| {
+                    let _ = sender.send(event);
+                };
+                let outcome = self
+                    .run_task(task, self.saving(run_id), false, Some(&emit))
+                    .instrument(span.clone())
+                    .await;
+                record_outcome(&span, &outcome);
+                outcome
             },
             |outcome| SwarmEvent::Finished(Box::new(outcome)),
         )
@@ -640,6 +699,9 @@ impl Swarm {
                     tokio::select! {
                         outcome = &mut agent => break outcome,
                         Some(question) = asked.recv() => {
+                            // The question's text stays out of telemetry, as Rig
+                            // keeps prompts out unless content recording is on.
+                            tracing::info!(swarm.agent = %question.from(), "human.question");
                             emit(SwarmEvent::Question(question.pausing(&clock)));
                         }
                     }
@@ -659,7 +721,13 @@ impl Swarm {
                         let limit = inner.max_handoffs;
                         return Err(trail.fail(SwarmFailure::MaxHandoffs { limit }));
                     }
-                    tracing::debug!(from = %handoff.from, to = %handoff.to, "swarm handoff");
+                    // A span event of the run: where the work went, and why.
+                    tracing::info!(
+                        swarm.from = %handoff.from,
+                        swarm.to = %handoff.to,
+                        swarm.message = %handoff.message,
+                        "swarm.handoff"
+                    );
                     current = next;
                     if let Some(context) = &handoff.context {
                         trail.shared.push((handoff.from.clone(), context.clone()));

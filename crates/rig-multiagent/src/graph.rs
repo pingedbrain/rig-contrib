@@ -471,13 +471,76 @@ pub enum GraphFailure {
     },
 }
 
+/// The span a graph run is in. Its totals are recorded when the run ends:
+/// tokens under `graph.usage.*` (not `gen_ai.usage.*`, which the model calls
+/// under it carry, so backends do not count them twice).
+fn run_span(run_id: Option<&str>) -> tracing::Span {
+    tracing::info_span!(
+        "graph.run",
+        graph.run_id = run_id,
+        graph.node_runs = tracing::field::Empty,
+        graph.usage.input_tokens = tracing::field::Empty,
+        graph.usage.output_tokens = tracing::field::Empty,
+        otel.status_code = tracing::field::Empty,
+        error.type = tracing::field::Empty,
+    )
+}
+
+/// Record how a run ended on its span.
+fn record_outcome(span: &tracing::Span, outcome: &Result<GraphRun, GraphError>) {
+    let run = match outcome {
+        Ok(run) => run,
+        Err(error) => {
+            span.record("otel.status_code", "ERROR");
+            if let Some(failure) = error.failures.first() {
+                span.record("error.type", failure.kind());
+            }
+            &error.run
+        }
+    };
+    span.record("graph.node_runs", run.state.order().len());
+    if let Some(tokens) = run.usage.input_tokens {
+        span.record("graph.usage.input_tokens", tokens);
+    }
+    if let Some(tokens) = run.usage.output_tokens {
+        span.record("graph.usage.output_tokens", tokens);
+    }
+}
+
+/// Mark a node's span failed when it failed or ran out of time.
+fn record_node<T>(span: &tracing::Span, outcome: &Option<Result<T, NodeError>>) {
+    let kind = match outcome {
+        Some(Ok(_)) => return,
+        Some(Err(_)) => "node_failed",
+        None => "timeout",
+    };
+    span.record("otel.status_code", "ERROR");
+    span.record("error.type", kind);
+}
+
+impl GraphFailure {
+    /// A short, stable name for the failure, for `error.type`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Node { .. } => "node_failed",
+            Self::NodeTimeout { .. } => "node_timeout",
+            Self::Timeout => "timeout",
+            Self::MaxNodeExecutions { .. } => "max_node_executions",
+            Self::Checkpoint { .. } => "checkpoint",
+        }
+    }
+}
+
 impl Graph {
     /// Run the graph on `task`.
     pub async fn run(&self, task: impl Into<String>) -> Result<GraphRun, GraphError> {
-        let span = tracing::info_span!("graph.run");
-        self.run_task(task.into(), None, false, None)
-            .instrument(span)
-            .await
+        let span = run_span(None);
+        let outcome = self
+            .run_task(task.into(), None, false, None)
+            .instrument(span.clone())
+            .await;
+        record_outcome(&span, &outcome);
+        outcome
     }
 
     /// Run the graph as run `run_id`: resume it from its last checkpoint if
@@ -497,10 +560,13 @@ impl Graph {
         run_id: &str,
         task: impl Into<String>,
     ) -> Result<GraphRun, GraphError> {
-        let span = tracing::info_span!("graph.run", graph.run_id = %run_id);
-        self.run_task(task.into(), self.saving(Some(run_id)), false, None)
-            .instrument(span)
-            .await
+        let span = run_span(Some(run_id));
+        let outcome = self
+            .run_task(task.into(), self.saving(Some(run_id)), false, None)
+            .instrument(span.clone())
+            .await;
+        record_outcome(&span, &outcome);
+        outcome
     }
 
     /// [`stream`](Self::stream) as run `run_id`, resuming it as
@@ -528,16 +594,18 @@ impl Graph {
         task: String,
         run_id: Option<&'a str>,
     ) -> WasmBoxedStream<'a, GraphEvent> {
+        let span = run_span(run_id);
         events(
-            move |sender| {
-                async move {
-                    let emit = move |event| {
-                        let _ = sender.send(event);
-                    };
-                    self.run_task(task, self.saving(run_id), false, Some(&emit))
-                        .await
-                }
-                .instrument(tracing::info_span!("graph.run"))
+            move |sender| async move {
+                let emit = move |event| {
+                    let _ = sender.send(event);
+                };
+                let outcome = self
+                    .run_task(task, self.saving(run_id), false, Some(&emit))
+                    .instrument(span.clone())
+                    .await;
+                record_outcome(&span, &outcome);
+                outcome
             },
             |outcome| GraphEvent::Finished(Box::new(outcome)),
         )
@@ -716,12 +784,19 @@ impl Graph {
                         let saving = saving
                             .as_ref()
                             .map(|saving| saving.part("node", &node.id, part));
-                        let span = tracing::info_span!("graph.node", graph.node = %node.id);
+                        let span = tracing::info_span!(
+                            "graph.node",
+                            graph.node = %node.id,
+                            otel.status_code = tracing::field::Empty,
+                            error.type = tracing::field::Empty,
+                        );
                         async move {
                             let Some(emit) = emit else {
                                 let io = NodeIo::quiet(&node.id).saving_to(saving);
-                                let run = node.node.run(input, &io).instrument(span);
-                                return (index, node, clock.within(budget, run).await);
+                                let run = node.node.run(input, &io).instrument(span.clone());
+                                let outcome = clock.within(budget, run).await;
+                                record_node(&span, &outcome);
+                                return (index, node, outcome);
                             };
                             emit(GraphEvent::NodeStarted {
                                 node: node.id.clone(),
@@ -733,12 +808,16 @@ impl Graph {
                                 })
                             };
                             let on_question = |question: Question| {
+                                // The text stays out of telemetry, as Rig keeps
+                                // prompts out unless content recording is on.
+                                tracing::info!(graph.node = %node.id, "human.question");
                                 emit(GraphEvent::Question(question.pausing(clock)))
                             };
                             let io = NodeIo::streaming(&node.id, &on_text, &on_question)
                                 .saving_to(saving);
-                            let run = node.node.run(input, &io).instrument(span);
+                            let run = node.node.run(input, &io).instrument(span.clone());
                             let outcome = clock.within(budget, run).await;
+                            record_node(&span, &outcome);
                             let id = node.id.clone();
                             emit(match &outcome {
                                 Some(Ok(output)) => GraphEvent::NodeFinished {

@@ -17,3 +17,4 @@ mod human;
 mod resume;
 mod stream;
 mod swarm;
+mod telemetry;
