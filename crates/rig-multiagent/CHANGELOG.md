@@ -1,0 +1,31 @@
+# Changelog
+
+Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
+
+## 0.47.0 (unreleased)
+
+First release.
+
+- `Swarm`: named Rig agents that hand work to each other through a `handoff_to_agent`
+  tool, with handoff messages and shared context, limits on handoffs and time, and
+  repetition detection. A handoff ends the agent's turn.
+- `Graph`: agents, swarms, graphs and async functions (`node_fn`) as nodes; edges with
+  optional conditions; parallel batches; inputs built from dependencies; bounded
+  cycles; failed branches pruned while the rest finish.
+- `Swarm::stream` and `Graph::stream`: turns or nodes starting and finishing, the text
+  agents write as they write it, handoffs, and the outcome last; nested swarms and graphs
+  stream their text; dropping the stream stops the run.
+- A person in the loop: `Question` events in streamed runs; `human(question)` graph
+  nodes; `SwarmBuilder::allow_questions` and the `ask_human` tool; `NodeIo::ask` for
+  custom nodes. Time waiting for an answer does not count against timeouts.
+- Checkpoints in any rig-memory store (`checkpoints`): `run_as` / `stream_as` resume a
+  run after a failure or a restart, keeping its progress, its pending questions and its
+  counted time; `Resumed` events. Graphs save as each node finishes; every agent run
+  keeps a journal of its tool results (and answers from people), replayed instead of
+  run again; nested swarms and graphs resume inside their node.
+- `Node::run(input, io)` with `NodeIo` (text, questions, saving) replaces the separate
+  streaming method.
+- One prompt-cache key per conversation (swarm turn, agent node), stable across
+  resumes, unless the agent sets its own.
+- Token usage of every model call, stopped turns included; tracing spans per run and
+  per turn or node.
