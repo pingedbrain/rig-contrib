@@ -28,6 +28,20 @@ rig_agentcore::AgentCoreApp::new(agent)
   AgentCore Evaluations needs them to judge a session; they are off by default, as in
   Rig.
 
+## Verified on AWS
+
+On 2026-11-26, rig-lab (a Rig agent with a calculator tool, Claude Haiku 4.5 on
+Bedrock) ran on AgentCore Runtime in us-east-1 with `record_content(true)` and
+rig-otel's `aws` export, deployed as AWS documents it (ECR image, execution role,
+Transaction Search). A two-turn session (3×47−29, then ÷4) kept its conversation, its
+spans reached CloudWatch (`aws/spans`) under the session id, and AgentCore Evaluations'
+built-in evaluators judged it from those spans: GoalSuccessRate 1.0, Helpfulness 0.83
+and Correctness 1.0 per turn. The scripts are in rig-lab's `deploy/agentcore`.
+
+What made the spans evaluable: the scope `opentelemetry.instrumentation.rig`,
+`session.id` on every span, an `invoke_agent` span with `gen_ai.task.input` and
+`gen_ai.task.output`, and Rig's `chat` and `execute_tool` spans with content recorded.
+
 ## Testing
 
 `cargo test` serves the contract over real HTTP for agents on scripted models: ping, a
