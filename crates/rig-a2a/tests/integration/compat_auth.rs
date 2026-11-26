@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use rig_a2a::a2a::TaskState;
 use rig_a2a::{A2aServer, RemoteAgent, RemoteError, V03_PATH};
 use rig_agent::{Agent, AgentBuilder};
@@ -48,7 +48,12 @@ async fn a_v03_client_talks_to_the_v03_surface() -> anyhow::Result<()> {
             .await?
             .json()
             .await?;
-    ensure!(card["protocolVersion"] == "0.3.0" && card["url"] == format!("{url}{V03_PATH}"));
+    let field = |name: &str| card.get(name).and_then(serde_json::Value::as_str);
+    ensure!(
+        field("protocolVersion") == Some("0.3.0")
+            && field("url") == Some(format!("{url}{V03_PATH}").as_str()),
+        "{card}"
+    );
 
     let agent = RemoteAgent::connect(&format!("{url}{V03_PATH}")).await?;
     ensure!(agent.card().name == "Echo");
@@ -87,16 +92,20 @@ async fn v03_streams_as_server_sent_events() -> anyhow::Result<()> {
         .collect::<Result<_, _>>()?;
     let kinds: Vec<&str> = events
         .iter()
-        .filter_map(|e| e["result"]["kind"].as_str())
+        .filter_map(|e| e.pointer("/result/kind")?.as_str())
         .collect();
     ensure!(kinds.first() == Some(&"task"), "{kinds:?}");
     ensure!(kinds.contains(&"artifact-update"), "{kinds:?}");
-    let last = events.last().unwrap();
-    ensure!(last["id"] == 7, "frames answer the request id: {last}");
+    let last = events.last().context("no events")?;
+    let at = |pointer: &str| last.pointer(pointer).cloned();
     ensure!(
-        last["result"]["kind"] == "status-update"
-            && last["result"]["status"]["state"] == "completed"
-            && last["result"]["final"] == true,
+        at("/id") == Some(7.into()),
+        "frames answer the request id: {last}"
+    );
+    ensure!(
+        at("/result/kind") == Some("status-update".into())
+            && at("/result/status/state") == Some("completed".into())
+            && at("/result/final") == Some(true.into()),
         "{last}"
     );
     Ok(())
@@ -112,7 +121,10 @@ async fn unknown_v03_methods_are_json_rpc_errors() -> anyhow::Result<()> {
         .await?
         .json()
         .await?;
-    ensure!(response["error"]["code"] == -32601, "{response}");
+    ensure!(
+        response.pointer("/error/code") == Some(&(-32601).into()),
+        "{response}"
+    );
     Ok(())
 }
 
@@ -129,7 +141,8 @@ async fn the_bearer_token_guards_calls_but_not_cards() -> anyhow::Result<()> {
                 .json()
                 .await?;
         ensure!(
-            card["securitySchemes"]["bearer"].is_object(),
+            card.pointer("/securitySchemes/bearer")
+                .is_some_and(serde_json::Value::is_object),
             "{path}: {card}"
         );
     }

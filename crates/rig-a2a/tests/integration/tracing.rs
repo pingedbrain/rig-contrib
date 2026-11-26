@@ -13,6 +13,11 @@ use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, TraceCapture};
 async fn a_task_span_records_its_end_and_parents_the_agent_spans() -> anyhow::Result<()> {
     let capture = TraceCapture::default();
     let _guard = tracing::subscriber::set_default(capture.subscriber());
+    // With a single registered dispatcher, tracing-core decides whether a
+    // callsite is enabled by the default of whichever thread reaches it first,
+    // and other tests in this binary run on other threads without one. A
+    // second live dispatcher makes it ask every registered dispatcher instead.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
 
     let model = MockCompletionModel::from_stream_turns([vec![
         MockStreamEvent::text("pong"),

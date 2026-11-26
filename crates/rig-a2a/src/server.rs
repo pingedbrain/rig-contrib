@@ -15,6 +15,7 @@ use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use rig_agent::Agent;
+use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
 use crate::A2aExecutor;
 use crate::v03::{self, V03_PATH};
@@ -94,8 +95,8 @@ impl<S: TaskStore> A2aServer<S> {
         T: schemars::JsonSchema
             + serde::de::DeserializeOwned
             + serde::Serialize
-            + Send
-            + Sync
+            + WasmCompatSend
+            + WasmCompatSync
             + 'static,
     {
         self.executor = self.executor.typed::<T>();
@@ -117,7 +118,7 @@ impl<S: TaskStore> A2aServer<S> {
     #[must_use]
     pub fn history_store<T>(mut self, store: T) -> Self
     where
-        T: rig_memory::AsyncStore + Send + Sync + 'static,
+        T: rig_memory::AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
     {
         self.executor = self.executor.history_store(store);
         self

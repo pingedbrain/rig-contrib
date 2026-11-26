@@ -3,7 +3,7 @@
 //! context ids that cannot escape a file store.
 #![cfg(not(target_family = "wasm"))]
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use rig_a2a::a2a::TaskState;
 use rig_a2a::rig_memory::MemoryStore;
 use rig_a2a::rig_memory::recent::LastMessages;
@@ -44,7 +44,7 @@ async fn a_second_server_on_the_same_store_continues_the_conversation() -> anyho
         .await?
         .send("I am Ada.", None)
         .await?;
-    let context = reply.context_id.expect("a context");
+    let context = reply.context_id.context("a context")?;
 
     // Another server (a restart, a replica) on the same store.
     let second_model = model(&["You are Ada."]);
@@ -62,7 +62,8 @@ async fn a_second_server_on_the_same_store_continues_the_conversation() -> anyho
     ensure!(reply.text == "You are Ada.");
 
     let requests = second_model.requests();
-    let seen = format!("{:?}", requests[0].chat_history);
+    let first = requests.first().context("a request")?;
+    let seen = format!("{:?}", first.chat_history);
     ensure!(
         seen.contains("I am Ada.") && seen.contains("Nice to meet you, Ada."),
         "the second server's model saw the first turn: {seen}"
@@ -87,7 +88,8 @@ async fn the_window_bounds_what_the_model_sees() -> anyhow::Result<()> {
     remote.send("second", context).await?;
     remote.send("third", context).await?;
 
-    let third = &windowed.requests()[2];
+    let requests = windowed.requests();
+    let third = requests.get(2).context("a third request")?;
     let seen = format!("{:?}", third.chat_history);
     ensure!(
         !seen.contains("first"),

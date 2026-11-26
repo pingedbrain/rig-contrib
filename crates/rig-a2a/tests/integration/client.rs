@@ -57,7 +57,7 @@ async fn a_local_agent_calls_the_remote_one_as_a_tool() -> anyhow::Result<()> {
         .build();
     let tool = RemoteAgent::connect(&serve(remote).await?)
         .await?
-        .into_tool();
+        .into_tool()?;
     ensure!(
         tool.name() == "oracle",
         "tool named after the card: {}",

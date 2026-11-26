@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use futures::StreamExt;
 use futures::stream::BoxStream;
 use rig_a2a::a2a::{
@@ -165,34 +165,45 @@ async fn data_and_files_reach_the_reply_and_the_model() -> anyhow::Result<()> {
     // v1.0 carries data parts as a protobuf Struct, whose numbers are doubles:
     // 42 arrives as 42.0. Compare by value.
     ensure!(
-        reply.data.len() == 1 && reply.data[0]["total"].as_f64() == Some(42.0),
+        reply.data.len() == 1
+            && reply
+                .data
+                .first()
+                .and_then(|data| data.get("total")?.as_f64())
+                == Some(42.0),
         "{reply:?}"
     );
-    ensure!(reply.files.len() == 2, "{reply:?}");
-    ensure!(reply.files[0].content == FileContent::Bytes(PNG.to_vec()));
-    ensure!(reply.files[0].name.as_deref() == Some("chart.png"));
-    ensure!(reply.files[1].content == FileContent::Url("https://example.com/report.pdf".into()));
+    let [chart, report] = reply.files.as_slice() else {
+        anyhow::bail!("two files: {reply:?}");
+    };
+    ensure!(chart.content == FileContent::Bytes(PNG.to_vec()));
+    ensure!(chart.name.as_deref() == Some("chart.png"));
+    ensure!(report.content == FileContent::Url("https://example.com/report.pdf".into()));
 
     // As a tool: the model gets the JSON summary and the image itself.
     let output = remote
-        .into_tool()
+        .into_tool()?
         .run(serde_json::json!({"message": "Build the report"}))
         .await?;
     let content = output.as_content();
-    ensure!(content.len() == 2, "JSON then the image: {content:?}");
-    let summary = content[0].as_json().expect("a JSON block first");
+    let [json, image] = content else {
+        anyhow::bail!("JSON then the image: {content:?}");
+    };
+    let summary = json.as_json().context("a JSON block first")?;
+    let at = |pointer: &str| summary.pointer(pointer);
     ensure!(
-        summary["data"][0]["total"].as_f64() == Some(42.0),
+        at("/data/0/total").and_then(serde_json::Value::as_f64) == Some(42.0),
         "{summary}"
     );
     ensure!(
-        summary["files"][0]["shown"] == "as an image below",
+        at("/files/0/shown").and_then(serde_json::Value::as_str) == Some("as an image below"),
         "{summary}"
     );
     ensure!(
-        summary["files"][1]["url"] == "https://example.com/report.pdf",
+        at("/files/1/url").and_then(serde_json::Value::as_str)
+            == Some("https://example.com/report.pdf"),
         "{summary}"
     );
-    ensure!(matches!(content[1], ToolResultContent::Image(_)));
+    ensure!(matches!(image, ToolResultContent::Image(_)));
     Ok(())
 }

@@ -2,7 +2,7 @@
 //! what shape that data has.
 #![cfg(not(target_family = "wasm"))]
 
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use rig_a2a::a2a::TaskState;
 use rig_a2a::{A2aServer, RemoteAgent};
 use rig_agent::AgentBuilder;
@@ -35,21 +35,28 @@ async fn a_typed_agent_answers_with_json_its_card_describes() -> anyhow::Result<
         card.default_output_modes == ["application/json"],
         "{card:?}"
     );
+    let skill = card.skills.first().context("a skill")?;
     ensure!(
-        card.skills[0].description.contains("\"priority\""),
+        skill.description.contains("\"priority\""),
         "the schema is in the skill: {}",
-        card.skills[0].description
+        skill.description
     );
 
     let reply = remote
         .send("Urgent: migrate payments to Postgres", None)
         .await?;
     ensure!(reply.state == Some(TaskState::Completed), "{reply:?}");
-    ensure!(reply.data.len() == 1, "{reply:?}");
-    ensure!(reply.data[0]["title"] == "Migrate payments to Postgres");
-    ensure!(reply.data[0]["priority"] == "high");
+    let [data] = reply.data.as_slice() else {
+        anyhow::bail!("one data part: {reply:?}");
+    };
+    let field = |name: &str| data.get(name).and_then(serde_json::Value::as_str);
+    ensure!(field("title") == Some("Migrate payments to Postgres"));
+    ensure!(field("priority") == Some("high"));
     ensure!(
-        model.requests()[0].output_schema.is_some(),
+        model
+            .requests()
+            .first()
+            .is_some_and(|request| request.output_schema.is_some()),
         "the run asked the model for structured output"
     );
     Ok(())

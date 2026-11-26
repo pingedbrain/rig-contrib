@@ -7,7 +7,7 @@ A2A Rust SDK ([`a2a-lf`](https://github.com/a2aproject/a2a-rs)):
 - **Serve** a Rig agent to any A2A client: `A2aServer::new(agent, url).into_router()`
   gives an Axum router with the agent card, JSON-RPC and HTTP+JSON bindings, SSE
   streaming, task get/list/cancel and per-`contextId` conversation history.
-- **Call** any A2A agent from a Rig agent: `RemoteAgent::connect(url).await?.into_tool()`
+- **Call** any A2A agent from a Rig agent: `RemoteAgent::connect(url).await?.into_tool()?`
   gives a `DynamicTool` named after the remote agent's card. Answers keep their text,
   structured data and files; the model gets a JSON summary plus any image itself.
 - **Follow** an answer as it is written: `remote.stream(text, None)` yields
@@ -21,7 +21,7 @@ rig_a2a::axum::serve(listener, app).await?;
 
 // Call
 let remote = rig_a2a::RemoteAgent::connect("http://127.0.0.1:3000").await?;
-let agent = AgentBuilder::new(model).dynamic_tool(remote.into_tool()).build();
+let agent = AgentBuilder::new(model).dynamic_tool(remote.into_tool()?).build();
 ```
 
 Targets Rig 0.47. Native only (no wasm).
@@ -151,6 +151,6 @@ to catch new releases upstream.
 
 ## Credits
 
-The server half (`server.rs`, `executor.rs`, `parts.rs`, `tests/serve.rs`) is adapted
+The server half (`server.rs`, `executor.rs`, `parts.rs`, `tests/integration/serve.rs`) is adapted
 from the unmerged `rig-a2a` crate in 0xPlaygrounds/rig#2820 (branch `triage/a2a`), by the
 Rig maintainers, ported to the Rig 0.47 API. MIT licensed; see `LICENSE`.

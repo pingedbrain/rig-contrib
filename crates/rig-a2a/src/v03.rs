@@ -64,7 +64,7 @@ pub(crate) fn card(card: &AgentCard, url: &str, bearer: bool) -> Value {
             })
         })
         .collect();
-    let mut v03 = json!({
+    let v03 = json!({
         "name": card.name,
         "description": card.description,
         "url": url,
@@ -79,11 +79,16 @@ pub(crate) fn card(card: &AgentCard, url: &str, bearer: bool) -> Value {
         "defaultOutputModes": card.default_output_modes,
         "skills": skills,
     });
-    if bearer {
-        v03["securitySchemes"] = json!({"bearer": {"type": "http", "scheme": "bearer"}});
-        v03["security"] = json!([{"bearer": []}]);
-    }
-    v03
+    with_present(
+        v03,
+        [
+            (
+                "securitySchemes",
+                bearer.then(|| json!({"bearer": {"type": "http", "scheme": "bearer"}})),
+            ),
+            ("security", bearer.then(|| json!([{"bearer": []}]))),
+        ],
+    )
 }
 
 async fn rpc(
@@ -93,8 +98,9 @@ async fn rpc(
 ) -> Response {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
     let params = service_params(&headers);
-    let body = &request["params"];
-    let result = match request["method"].as_str().unwrap_or_default() {
+    let body = request.get("params").unwrap_or(&Value::Null);
+    let method = request.get("method").and_then(Value::as_str);
+    let result = match method.unwrap_or_default() {
         "message/send" => match send_request(body) {
             Ok(req) => handler
                 .send_message(&params, req)
@@ -179,8 +185,9 @@ fn service_params(headers: &HeaderMap) -> ServiceParams {
 fn send_request(params: &Value) -> Result<SendMessageRequest, A2AError> {
     let message = message_from_json(&params["message"])?;
     // v0.3 waits for the task to finish unless told `blocking: false`.
-    let return_immediately = params["configuration"]["blocking"]
-        .as_bool()
+    let return_immediately = params
+        .pointer("/configuration/blocking")
+        .and_then(Value::as_bool)
         .map(|blocking| !blocking);
     Ok(SendMessageRequest {
         message,
@@ -239,30 +246,34 @@ fn event_json(event: &StreamResponse) -> Value {
 }
 
 fn task_json(task: &Task) -> Value {
-    let mut json = json!({
+    let json = json!({
         "kind": "task",
         "id": task.id,
         "contextId": task.context_id,
         "status": status_json(&task.status),
     });
-    if let Some(artifacts) = &task.artifacts {
-        json["artifacts"] = artifacts.iter().map(artifact_json).collect();
-    }
-    if let Some(history) = &task.history {
-        json["history"] = history.iter().map(message_json).collect();
-    }
-    json
+    let artifacts = task
+        .artifacts
+        .as_ref()
+        .map(|artifacts| artifacts.iter().map(artifact_json).collect());
+    let history = task
+        .history
+        .as_ref()
+        .map(|history| history.iter().map(message_json).collect());
+    with_present(json, [("artifacts", artifacts), ("history", history)])
 }
 
 fn status_json(status: &TaskStatus) -> Value {
-    let mut json = json!({"state": state_name(&status.state)});
-    if let Some(message) = &status.message {
-        json["message"] = message_json(message);
-    }
-    if let Some(timestamp) = status.timestamp {
-        json["timestamp"] = json!(timestamp.to_rfc3339());
-    }
-    json
+    with_present(
+        json!({"state": state_name(&status.state)}),
+        [
+            ("message", status.message.as_ref().map(message_json)),
+            (
+                "timestamp",
+                status.timestamp.map(|at| json!(at.to_rfc3339())),
+            ),
+        ],
+    )
 }
 
 fn artifact_json(artifact: &Artifact) -> Value {
@@ -275,30 +286,33 @@ fn artifact_json(artifact: &Artifact) -> Value {
 }
 
 fn message_json(message: &Message) -> Value {
-    let mut json = json!({
+    let json = json!({
         "kind": "message",
         "messageId": message.message_id,
         "role": if message.role == Role::User { "user" } else { "agent" },
         "parts": message.parts.iter().map(part_json).collect::<Vec<_>>(),
     });
-    if let Some(context) = &message.context_id {
-        json["contextId"] = json!(context);
-    }
-    if let Some(task) = &message.task_id {
-        json["taskId"] = json!(task);
-    }
-    json
+    with_present(
+        json,
+        [
+            ("contextId", message.context_id.as_ref().map(|id| json!(id))),
+            ("taskId", message.task_id.as_ref().map(|id| json!(id))),
+        ],
+    )
 }
 
 fn part_json(part: &Part) -> Value {
     let file = |source: (&str, Value)| {
-        let mut file = json!({ source.0: source.1 });
-        if let Some(media_type) = &part.media_type {
-            file["mimeType"] = json!(media_type);
-        }
-        if let Some(name) = &part.filename {
-            file["name"] = json!(name);
-        }
+        let file = with_present(
+            json!({ source.0: source.1 }),
+            [
+                (
+                    "mimeType",
+                    part.media_type.as_ref().map(|media| json!(media)),
+                ),
+                ("name", part.filename.as_ref().map(|name| json!(name))),
+            ],
+        );
         json!({"kind": "file", "file": file})
     };
     match &part.content {
@@ -307,6 +321,19 @@ fn part_json(part: &Part) -> Value {
         PartContent::Raw(bytes) => file(("bytes", json!(BASE64.encode(bytes)))),
         PartContent::Url(url) => file(("uri", json!(url))),
     }
+}
+
+/// `object` with each of `fields` that has a value: v0.3 leaves an absent
+/// field out rather than sending `null`.
+fn with_present<const N: usize>(mut object: Value, fields: [(&str, Option<Value>); N]) -> Value {
+    if let Value::Object(map) = &mut object {
+        map.extend(
+            fields
+                .into_iter()
+                .filter_map(|(name, value)| Some((name.to_owned(), value?))),
+        );
+    }
+    object
 }
 
 pub(crate) fn state_name(state: &TaskState) -> &'static str {
@@ -558,62 +585,4 @@ fn artifact_from_json(json: &Value) -> Result<Artifact, A2AError> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn messages_round_trip_through_v03_json() {
-        let mut message = Message::new(Role::User, vec![Part::text("hi")]);
-        message.context_id = Some("ctx".into());
-        let json = message_json(&message);
-        assert_eq!(json["parts"][0], json!({"kind": "text", "text": "hi"}));
-        assert_eq!(json["role"], "user");
-        let back = message_from_json(&json).unwrap();
-        assert_eq!(back.parts[0].as_text(), Some("hi"));
-        assert_eq!(back.context_id.as_deref(), Some("ctx"));
-        assert_eq!(back.message_id, message.message_id);
-    }
-
-    #[test]
-    fn file_parts_keep_bytes_and_media_type() {
-        let json = json!({"kind": "file", "file": {"bytes": "aGk=", "mimeType": "text/plain", "name": "a.txt"}});
-        let part = part_from_json(&json).unwrap();
-        assert_eq!(part.content, PartContent::Raw(b"hi".to_vec()));
-        assert_eq!(part_json(&part), json);
-    }
-
-    #[test]
-    fn v03_results_become_v1_events() {
-        let done = json!({"kind": "task", "id": "t", "contextId": "c", "status": {"state": "completed"},
-            "artifacts": [{"artifactId": "a", "parts": [{"kind": "text", "text": "42"},
-                {"kind": "data", "data": {"n": 42}}]}]});
-        let StreamResponse::Task(task) = response_from_json(&done).unwrap() else {
-            panic!()
-        };
-        assert_eq!(task.status.state, TaskState::Completed);
-        assert_eq!(
-            task.artifacts.unwrap()[0].parts[1].content,
-            PartContent::Data(json!({"n": 42}))
-        );
-
-        let update = json!({"kind": "artifact-update", "taskId": "t", "contextId": "c", "append": true,
-            "artifact": {"artifactId": "a", "parts": [{"kind": "text", "text": "lo"}]}});
-        let StreamResponse::ArtifactUpdate(update) = response_from_json(&update).unwrap() else {
-            panic!()
-        };
-        assert_eq!(update.append, Some(true));
-
-        let error =
-            json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "no task"}});
-        assert_eq!(response_from_frame(&error).unwrap_err().code, -32001);
-    }
-
-    #[test]
-    fn sse_blocks_yield_their_data() {
-        assert_eq!(
-            sse_data(b"event: x\ndata: {\"a\":1}\n\n").as_deref(),
-            Some("{\"a\":1}")
-        );
-        assert_eq!(sse_data(b": keep-alive\n\n"), None);
-    }
-}
+mod tests;

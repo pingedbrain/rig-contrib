@@ -12,13 +12,13 @@ use a2a_server::{AgentExecutor, ExecutorContext};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
-use futures::future::BoxFuture;
 use futures::stream::{AbortHandle, Abortable, BoxStream};
 use rig_agent::Agent;
 use rig_agent::agent::MultiTurnStreamItem;
 use rig_agent::completion::{PromptError, StructuredOutputError};
 use rig_core::message::{AssistantContent, DocumentSourceKind, MimeType};
 use rig_core::streaming::{Item, StreamEvent};
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use rig_memory::AsyncStore;
 use rig_memory::recent::{Recent, TokenBudget, view};
 
@@ -39,13 +39,14 @@ pub const DEFAULT_MAX_RUN_DURATION: Duration = Duration::from_secs(600);
 type Running = Arc<Mutex<HashMap<TaskId, AbortHandle>>>;
 
 /// A typed run, erased: the agent, the prompt and the history in; the answer
-/// as JSON and the run's transcript out, or what to tell the caller.
+/// as JSON and the run's transcript out, or what to tell the caller. `Send`
+/// and `Sync` because the A2A server shares the executor across tasks.
 type TypedAnswer = Arc<
     dyn Fn(
             Agent,
             rig_core::message::Message,
             Vec<rig_core::message::Message>,
-        ) -> BoxFuture<
+        ) -> WasmBoxedFuture<
             'static,
             Result<(serde_json::Value, Vec<rig_core::message::Message>), String>,
         > + Send
@@ -103,8 +104,8 @@ impl A2aExecutor {
         T: schemars::JsonSchema
             + serde::de::DeserializeOwned
             + serde::Serialize
-            + Send
-            + Sync
+            + WasmCompatSend
+            + WasmCompatSync
             + 'static,
     {
         self.typed = Some(Arc::new(|agent, prompt, history| {
@@ -164,7 +165,7 @@ impl A2aExecutor {
     #[must_use]
     pub fn history_store<S>(mut self, store: S) -> Self
     where
-        S: AsyncStore + Send + Sync + 'static,
+        S: AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
     {
         self.history = Arc::new(Persistent(store));
         self
@@ -507,59 +508,4 @@ fn failure_message(failure: &PromptError) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
-    use rig_core::message::{AssistantContent, DocumentSourceKind, Image, ImageMediaType};
-
-    use super::*;
-
-    #[test]
-    fn failures_are_classified_by_status_and_retryability() {
-        use rig_core::error::{ErrorKind, ErrorReport};
-        let report = |status: Option<u16>, retryable: bool| {
-            let mut report = ErrorReport::new(ErrorKind::ProviderResponse, "upstream said no")
-                .with_retryable(retryable);
-            if let Some(status) = status {
-                report = report.with_http_status(status);
-            }
-            PromptError::Report(report)
-        };
-        assert!(failure_message(&report(Some(429), true)).contains("rate limiting"));
-        assert!(failure_message(&report(Some(401), false)).contains("credentials"));
-        assert!(failure_message(&report(Some(503), true)).contains("unavailable"));
-        assert!(failure_message(&report(None, true)).contains("could not be reached"));
-        assert_eq!(
-            failure_message(&report(None, false)),
-            "The agent run failed."
-        );
-    }
-
-    #[test]
-    fn model_images_become_file_parts_after_the_text() {
-        let image = |data| {
-            AssistantContent::Image(Image {
-                data,
-                media_type: Some(ImageMediaType::PNG),
-                ..Default::default()
-            })
-        };
-        let content = [
-            AssistantContent::text("here"),
-            image(DocumentSourceKind::base64("aGk=")),
-            image(DocumentSourceKind::url("https://x/a.png")),
-            image(DocumentSourceKind::file_id("file-1")),
-        ];
-        let parts = answer_parts("here", &content);
-        assert_eq!(
-            parts.len(),
-            3,
-            "text, the decoded image, the URL image; no file id"
-        );
-        assert_eq!(parts[0].as_text(), Some("here"));
-        assert_eq!(parts[1].content, a2a::PartContent::Raw(b"hi".to_vec()));
-        assert_eq!(parts[1].media_type.as_deref(), Some("image/png"));
-        assert_eq!(
-            parts[2].content,
-            a2a::PartContent::Url("https://x/a.png".into())
-        );
-    }
-}
+mod tests;

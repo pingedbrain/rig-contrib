@@ -22,11 +22,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt};
 use rig_core::message::{
-    DocumentSourceKind, Image, ImageMediaType, MimeType, ToolName, ToolResultContent,
+    DocumentSourceKind, EmptyToolName, Image, ImageMediaType, MimeType, ToolName, ToolResultContent,
 };
 use rig_core::tool::{DynamicTool, ToolExecutionError, ToolOutput};
+use rig_core::wasm_compat::WasmBoxedStream;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::v03;
 
@@ -211,10 +212,12 @@ impl RemoteAgent {
         &self,
         text: &str,
         context_id: Option<&str>,
-    ) -> Result<BoxStream<'static, Result<ReplyEvent, RemoteError>>, RemoteError> {
+    ) -> Result<WasmBoxedStream<'static, Result<ReplyEvent, RemoteError>>, RemoteError> {
         if !self.streams() {
             let reply = self.whole(text, context_id).await?;
-            return Ok(futures::stream::iter([Ok(ReplyEvent::Done(reply))]).boxed());
+            return Ok(Box::pin(futures::stream::iter([Ok(ReplyEvent::Done(
+                reply,
+            ))])));
         }
         let message = user_message(text, context_id);
         let open = async {
@@ -233,7 +236,7 @@ impl RemoteAgent {
         let events = tokio::time::timeout(timeout, open)
             .await
             .map_err(|_| RemoteError::Timeout(timeout))??;
-        Ok(follow(events, timeout).boxed())
+        Ok(Box::pin(follow(events, timeout)))
     }
 
     /// This agent as a tool named after its card, taking a `message` and an
@@ -241,9 +244,12 @@ impl RemoteAgent {
     ///
     /// The model gets the answer as JSON (`reply`, `context_id`, `state`,
     /// and any `data` and `files`), followed by any image the agent sent.
-    pub fn into_tool(self) -> DynamicTool {
-        let name = ToolName::new(tool_name(&self.card.name))
-            .expect("tool_name never returns an empty name");
+    ///
+    /// Returns [`EmptyToolName`] when the tool name is empty, as
+    /// [`Agent::into_tool`](rig_agent::Agent::into_tool) does; a card whose
+    /// name has no usable characters is named `remote_agent` instead.
+    pub fn into_tool(self) -> Result<DynamicTool, EmptyToolName> {
+        let name = ToolName::new(tool_name(&self.card.name))?;
         let description = tool_description(&self.card);
         let parameters = json!({
             "type": "object",
@@ -260,19 +266,23 @@ impl RemoteAgent {
             "required": ["message"],
             "additionalProperties": false
         });
-        DynamicTool::new_with_context(name, description, parameters, move |_context, args| {
-            let agent = self.clone();
-            Box::pin(async move {
-                let args = Args::deserialize(args).map_err(|error| {
-                    ToolExecutionError::other(format!("invalid arguments: {error}"))
-                })?;
-                let reply = agent
-                    .send(&args.message, args.context_id.as_deref())
-                    .await
-                    .map_err(|error| ToolExecutionError::other(format!("remote agent: {error}")))?;
-                tool_output(&reply)
-            })
-        })
+        let tool =
+            DynamicTool::new_with_context(name, description, parameters, move |_context, args| {
+                let agent = self.clone();
+                Box::pin(async move {
+                    let args = Args::deserialize(args).map_err(|error| {
+                        ToolExecutionError::other(format!("invalid arguments: {error}"))
+                    })?;
+                    let reply = agent
+                        .send(&args.message, args.context_id.as_deref())
+                        .await
+                        .map_err(|error| {
+                            ToolExecutionError::other(format!("remote agent: {error}"))
+                        })?;
+                    tool_output(&reply)
+                })
+            });
+        Ok(tool)
     }
 }
 
@@ -329,7 +339,7 @@ impl RemoteAgentBuilder {
             });
         }
 
-        let Some(url) = card["url"].as_str().map(str::to_owned) else {
+        let Some(url) = card.get("url").and_then(Value::as_str).map(str::to_owned) else {
             return Err(RemoteError::Card(
                 "neither `supportedInterfaces` (v1.0) nor `url` (v0.3)".into(),
             ));
@@ -551,18 +561,20 @@ fn tool_output(reply: &Reply) -> Result<ToolOutput, ToolExecutionError> {
         .iter()
         .map(|file| describe_file(file, &mut images))
         .collect();
-    let mut summary = json!({
-        "reply": reply.text,
-        "context_id": reply.context_id,
-        "state": reply.state.as_ref().map(v03::state_name),
-    });
+    let mut summary = Map::new();
+    summary.insert("reply".into(), json!(reply.text));
+    summary.insert("context_id".into(), json!(reply.context_id));
+    summary.insert(
+        "state".into(),
+        json!(reply.state.as_ref().map(v03::state_name)),
+    );
     if !reply.data.is_empty() {
-        summary["data"] = json!(reply.data);
+        summary.insert("data".into(), json!(reply.data));
     }
     if !files.is_empty() {
-        summary["files"] = json!(files);
+        summary.insert("files".into(), json!(files));
     }
-    let mut content = vec![ToolResultContent::json(summary)];
+    let mut content = vec![ToolResultContent::json(Value::Object(summary))];
     content.extend(images);
     ToolOutput::content(content)
 }
@@ -571,7 +583,9 @@ fn tool_output(reply: &Reply) -> Result<ToolOutput, ToolExecutionError> {
 /// small text file, its URL when it has one. Images also go into `images`,
 /// for the model to look at.
 fn describe_file(file: &RemoteFile, images: &mut Vec<ToolResultContent>) -> Value {
-    let mut described = json!({"name": file.name, "media_type": file.media_type});
+    let mut described = Map::new();
+    described.insert("name".into(), json!(file.name));
+    described.insert("media_type".into(), json!(file.media_type));
     let image_kind = |bytes: Option<&[u8]>| {
         file.media_type
             .as_deref()
@@ -587,14 +601,14 @@ fn describe_file(file: &RemoteFile, images: &mut Vec<ToolResultContent>) -> Valu
     };
     match &file.content {
         FileContent::Url(url) => {
-            described["url"] = json!(url);
+            described.insert("url".into(), json!(url));
             if let Some(kind) = image_kind(None) {
                 images.push(image(DocumentSourceKind::url(url), kind));
-                described["shown"] = json!("as an image below");
+                described.insert("shown".into(), json!("as an image below"));
             }
         }
         FileContent::Bytes(bytes) => {
-            described["size_bytes"] = json!(bytes.len());
+            described.insert("size_bytes".into(), json!(bytes.len()));
             let texty = file
                 .media_type
                 .as_deref()
@@ -605,16 +619,18 @@ fn describe_file(file: &RemoteFile, images: &mut Vec<ToolResultContent>) -> Valu
                         DocumentSourceKind::base64(BASE64.encode(bytes)),
                         kind,
                     ));
-                    described["shown"] = json!("as an image below");
+                    described.insert("shown".into(), json!("as an image below"));
                 }
                 (None, Ok(text)) if texty && bytes.len() <= MAX_INLINE_TEXT => {
-                    described["text"] = json!(text);
+                    described.insert("text".into(), json!(text));
                 }
-                _ => described["shown"] = json!("not shown: binary or too large"),
+                _ => {
+                    described.insert("shown".into(), json!("not shown: binary or too large"));
+                }
             }
         }
     }
-    described
+    Value::Object(described)
 }
 
 /// A v0.3 card read as a v1.0 one, for [`RemoteAgent::card`]: one JSON-RPC
@@ -692,179 +708,4 @@ fn tool_description(card: &AgentCard) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use a2a::{TaskArtifactUpdateEvent, TaskStatus, TaskStatusUpdateEvent};
-
-    use super::*;
-
-    fn chunk(text: &str, append: bool) -> StreamResponse {
-        StreamResponse::ArtifactUpdate(TaskArtifactUpdateEvent {
-            task_id: "t".into(),
-            context_id: "c".into(),
-            artifact: Artifact {
-                artifact_id: "response".into(),
-                name: None,
-                description: None,
-                parts: vec![Part::text(text)],
-                metadata: None,
-                extensions: None,
-            },
-            append: Some(append),
-            last_chunk: None,
-            metadata: None,
-        })
-    }
-
-    fn status(state: TaskState) -> StreamResponse {
-        StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-            task_id: "t".into(),
-            context_id: "c".into(),
-            status: TaskStatus {
-                state,
-                message: None,
-                timestamp: None,
-            },
-            metadata: None,
-        })
-    }
-
-    #[test]
-    fn streamed_chunks_report_deltas_rewrites_and_the_whole_answer() {
-        let mut assembly = Assembly::default();
-        let events: Vec<ReplyEvent> = [
-            status(TaskState::Working),
-            chunk("Hel", false),
-            chunk("lo", true),
-            chunk("Hello", false), // the final answer replaces the chunks: same text, no event
-            chunk("Bye", false),   // a different answer is a rewrite
-            status(TaskState::Completed),
-        ]
-        .into_iter()
-        .flat_map(|event| assembly.apply(event))
-        .collect();
-        assert_eq!(
-            events,
-            [
-                ReplyEvent::Status(TaskState::Working),
-                ReplyEvent::Text("Hel".into()),
-                ReplyEvent::Text("lo".into()),
-                ReplyEvent::Rewrite("Bye".into()),
-                ReplyEvent::Status(TaskState::Completed),
-            ]
-        );
-        let reply = assembly.finish();
-        assert_eq!(reply.text, "Bye");
-        assert_eq!(reply.context_id.as_deref(), Some("c"));
-    }
-
-    #[test]
-    fn progress_in_status_messages_streams_then_the_artifact_settles_it() {
-        // The sequence Strands Agents sends: deltas as working status
-        // messages, then the whole answer as one artifact.
-        let working = |text: &str| {
-            StreamResponse::StatusUpdate(TaskStatusUpdateEvent {
-                task_id: "t".into(),
-                context_id: "c".into(),
-                status: TaskStatus {
-                    state: TaskState::Working,
-                    message: Some(Message::new(Role::Agent, vec![Part::text(text)])),
-                    timestamp: None,
-                },
-                metadata: None,
-            })
-        };
-        let mut assembly = Assembly::default();
-        let events: Vec<ReplyEvent> = [
-            working("Ho"),
-            working("la"),
-            chunk("Hola", false),
-            status(TaskState::Completed),
-        ]
-        .into_iter()
-        .flat_map(|event| assembly.apply(event))
-        .collect();
-        assert_eq!(
-            events,
-            [
-                ReplyEvent::Status(TaskState::Working),
-                ReplyEvent::Text("Ho".into()),
-                ReplyEvent::Text("la".into()),
-                ReplyEvent::Status(TaskState::Completed),
-            ],
-            "no rewrite when the artifact matches the streamed text"
-        );
-        assert_eq!(assembly.finish().text, "Hola");
-    }
-
-    #[tokio::test]
-    async fn a_stream_that_stops_unanswered_is_an_error() {
-        let unanswered = futures::stream::iter([Ok(status(TaskState::Working))]).boxed();
-        let events: Vec<_> = follow(unanswered, Duration::from_secs(1)).collect().await;
-        assert!(
-            matches!(events.last(), Some(Err(RemoteError::A2a(_)))),
-            "{events:?}"
-        );
-
-        let empty = futures::stream::empty().boxed();
-        let events: Vec<_> = follow(empty, Duration::from_secs(1)).collect().await;
-        assert!(
-            matches!(events.as_slice(), [Err(RemoteError::A2a(_))]),
-            "{events:?}"
-        );
-    }
-
-    #[test]
-    fn replies_keep_data_and_files() {
-        let mut data = Part::text("");
-        data.content = PartContent::Data(json!({"total": 3}));
-        let mut file = Part::text("");
-        file.content = PartContent::Url("https://x/report.pdf".into());
-        file.media_type = Some("application/pdf".into());
-        let reply = reply_from_parts([Part::text("Done"), data, file].iter(), None, None);
-        assert_eq!(reply.text, "Done");
-        assert_eq!(reply.data, [json!({"total": 3})]);
-        assert_eq!(
-            reply.files[0].content,
-            FileContent::Url("https://x/report.pdf".into())
-        );
-    }
-
-    #[test]
-    fn tool_output_shows_images_inlines_small_text_and_skips_binaries() {
-        // The smallest PNG header ImageMediaType::sniff recognizes.
-        let png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
-        let file = |media: Option<&str>, content| RemoteFile {
-            name: Some("f".into()),
-            media_type: media.map(str::to_owned),
-            content,
-        };
-        let reply = Reply {
-            text: "here".into(),
-            files: vec![
-                file(Some("image/png"), FileContent::Bytes(png)),
-                file(Some("text/csv"), FileContent::Bytes(b"a,b\n1,2".to_vec())),
-                file(
-                    Some("application/zip"),
-                    FileContent::Bytes(vec![0xff, 0x00]),
-                ),
-            ],
-            ..Reply::default()
-        };
-        let output = tool_output(&reply).unwrap();
-        let content = output.as_content();
-        assert_eq!(content.len(), 2, "the JSON block and one image");
-        assert!(matches!(content[1], ToolResultContent::Image(_)));
-        let files = &content[0].as_json().unwrap()["files"];
-        assert_eq!(files[0]["shown"], "as an image below");
-        assert_eq!(files[1]["text"], "a,b\n1,2");
-        assert_eq!(files[2]["shown"], "not shown: binary or too large");
-    }
-
-    #[test]
-    fn tool_names_are_provider_safe() {
-        assert_eq!(tool_name("Code Reviewer v2!"), "code_reviewer_v2");
-        assert_eq!(tool_name("   "), "remote_agent");
-        assert_eq!(tool_name("ñandú"), "and");
-        assert_eq!(tool_name(&"x".repeat(100)).len(), 64);
-    }
-}
+mod tests;
