@@ -1,0 +1,263 @@
+use aws_sdk_bedrockagentcore::types::EvaluationResultContent;
+use aws_sdk_cloudwatchlogs::types::ResultField;
+use serde_json::json;
+
+use super::*;
+use crate::ExpectedCall;
+
+const ARN: &str = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-VDrTj0Hfw9";
+
+#[test]
+fn the_runtime_id_is_the_last_arn_segment() {
+    assert_eq!(runtime_id(ARN).unwrap(), "rig_lab-VDrTj0Hfw9");
+    assert_eq!(
+        runtime_log_group(ARN, "DEFAULT").unwrap(),
+        "/aws/bedrock-agentcore/runtimes/rig_lab-VDrTj0Hfw9-DEFAULT"
+    );
+    for arn in [
+        "rig_lab",
+        "arn:aws:bedrock-agentcore:us-east-1:1:runtime/",
+        "arn:x:agent/a",
+    ] {
+        assert!(
+            matches!(runtime_id(arn), Err(AgentCoreError::InvalidArn(_))),
+            "{arn}"
+        );
+    }
+}
+
+#[test]
+fn the_query_filters_on_the_session() {
+    assert_eq!(
+        spans_query("rig-evals-1"),
+        "fields @timestamp, @message \
+         | filter ispresent(scope.name) and ispresent(attributes.session.id) \
+         | filter attributes.session.id = \"rig-evals-1\" \
+         | sort @timestamp asc | limit 500"
+    );
+    assert!(spans_query(r#"a"b"#).contains(r#"= "a\"b""#));
+}
+
+fn field(name: &str, value: &str) -> ResultField {
+    ResultField::builder().field(name).value(value).build()
+}
+
+#[test]
+fn query_rows_become_the_json_messages() {
+    let rows = vec![
+        vec![
+            field("@timestamp", "2026-11-26 10:00:00.000"),
+            field(
+                "@message",
+                r#"{"name": "invoke_agent rig", "traceId": "t1"}"#,
+            ),
+        ],
+        vec![field("@message", "plain text")],
+        vec![field("@message", "{not json")],
+        vec![field("@timestamp", "2026-11-26 10:00:01.000")],
+    ];
+    assert_eq!(
+        documents(&rows),
+        vec![json!({"name": "invoke_agent rig", "traceId": "t1"})]
+    );
+}
+
+#[test]
+fn spans_settle_once_an_invocation_arrived_and_the_count_held() {
+    let spans = vec![json!({"name": "chat"}), json!({"name": "invoke_agent rig"})];
+    assert!(!settled(None, &spans));
+    assert!(!settled(Some(1), &spans));
+    assert!(settled(Some(2), &spans));
+    assert!(!settled(Some(1), &[json!({"name": "chat"})]));
+}
+
+#[test]
+fn the_expected_answer_goes_to_the_last_invocation() {
+    let spans = vec![
+        json!({"name": "invoke_agent rig", "traceId": "t1"}),
+        json!({"name": "execute_tool calculate", "traceId": "t2"}),
+        json!({"name": "invoke_agent rig", "traceId": "t2"}),
+        json!({"name": "chat", "traceId": "t3"}),
+    ];
+    assert_eq!(last_trace_id(&spans), Some("t2"));
+    assert_eq!(last_trace_id(&[]), None);
+}
+
+fn span_context(reference: &EvaluationReferenceInput) -> &SpanContext {
+    reference
+        .context()
+        .and_then(|context| context.as_span_context().ok())
+        .expect("a span context")
+}
+
+#[test]
+fn a_case_maps_to_session_and_trace_references() {
+    let case = Case::new("mul", "987 * 654?")
+        .expected("645498")
+        .trajectory([ExpectedCall::new("calculate")])
+        .assertion("uses the calculator");
+    let references = reference_inputs(&case, "s1", Some("t1")).unwrap();
+    let [session, trace] = references.as_slice() else {
+        panic!("two references: {references:?}");
+    };
+    assert_eq!(span_context(session).session_id(), "s1");
+    assert_eq!(span_context(session).trace_id(), None);
+    assert_eq!(
+        session.assertions(),
+        [EvaluationContent::Text("uses the calculator".into())]
+    );
+    assert_eq!(
+        session.expected_trajectory().map(|t| t.tool_names()),
+        Some(&["calculate".to_owned()][..])
+    );
+    assert_eq!(session.expected_response(), None);
+    assert_eq!(span_context(trace).session_id(), "s1");
+    assert_eq!(span_context(trace).trace_id(), Some("t1"));
+    assert_eq!(
+        trace.expected_response(),
+        Some(&EvaluationContent::Text("645498".into()))
+    );
+}
+
+#[test]
+fn a_case_sends_only_the_references_it_has() {
+    let bare = Case::new("bare", "hi");
+    assert!(
+        reference_inputs(&bare, "s1", Some("t1"))
+            .unwrap()
+            .is_empty()
+    );
+
+    // An expected answer needs a trace to compare with.
+    let expected = Case::new("e", "hi").expected("hello");
+    assert!(reference_inputs(&expected, "s1", None).unwrap().is_empty());
+
+    let asserted = Case::new("a", "hi").assertion("greets");
+    let references = reference_inputs(&asserted, "s1", None).unwrap();
+    let [session] = references.as_slice() else {
+        panic!("one reference: {references:?}");
+    };
+    assert_eq!(session.expected_trajectory(), None);
+}
+
+fn result(value: Option<f64>, label: &str, explanation: &str) -> EvaluationResultContent {
+    EvaluationResultContent::builder()
+        .evaluator_arn("Builtin.Helpfulness")
+        .evaluator_id("Builtin.Helpfulness")
+        .evaluator_name("Helpfulness")
+        .set_value(value)
+        .label(label)
+        .explanation(explanation)
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn results_score_their_mean_with_labels_and_explanations() {
+    let results = [
+        result(Some(0.83), "Very Helpful", "Clear."),
+        result(Some(0.5), "Somewhat Helpful", "Terse."),
+    ];
+    let both = score("Builtin.Helpfulness", &results, 0.6).unwrap();
+    assert_eq!(both.evaluator, "Builtin.Helpfulness");
+    assert!((both.value - 0.665).abs() < 1e-9);
+    assert!(both.passed);
+    assert_eq!(
+        both.label.as_deref(),
+        Some("Very Helpful; Somewhat Helpful")
+    );
+    assert_eq!(both.explanation.as_deref(), Some("Clear.\n\nTerse."));
+
+    let single = score(
+        "Builtin.Helpfulness",
+        &[result(Some(0.25), "Not Helpful", "Wrong.")],
+        0.5,
+    )
+    .unwrap();
+    assert!(!single.passed);
+    assert_eq!(single.label.as_deref(), Some("Not Helpful"));
+}
+
+#[test]
+fn an_error_result_or_no_value_is_an_error() {
+    let failed = EvaluationResultContent::builder()
+        .evaluator_arn("Builtin.Correctness")
+        .evaluator_id("Builtin.Correctness")
+        .evaluator_name("Correctness")
+        .error_code("ValidationException")
+        .error_message("no traces")
+        .build()
+        .unwrap();
+    let error = score(
+        "Builtin.Correctness",
+        &[result(Some(1.0), "Yes", "Fine."), failed],
+        0.5,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, AgentCoreError::Result { code, message, .. }
+            if code == "ValidationException" && message == "no traces"),
+        "{error}"
+    );
+    assert!(matches!(
+        score("x", &[result(None, "Yes", "")], 0.5),
+        Err(AgentCoreError::NoScore(_))
+    ));
+    assert!(matches!(
+        score("x", &[], 0.5),
+        Err(AgentCoreError::NoScore(_))
+    ));
+}
+
+#[test]
+fn the_reply_is_the_response_field() {
+    assert_eq!(
+        reply(br#"{"response": "645498", "status": "success"}"#).unwrap(),
+        "645498"
+    );
+    assert!(matches!(
+        reply(br#"{"error": "boom", "status": "error"}"#),
+        Err(AgentCoreError::Reply(body)) if body.contains("boom")
+    ));
+}
+
+#[test]
+fn json_becomes_a_document() {
+    let Document::Object(map) = document(&json!({"a": [1, -2, 1.5, "s", true, null]})) else {
+        panic!("an object");
+    };
+    assert_eq!(
+        map.get("a"),
+        Some(&Document::Array(vec![
+            Document::Number(Number::PosInt(1)),
+            Document::Number(Number::NegInt(-2)),
+            Document::Number(Number::Float(1.5)),
+            Document::String("s".into()),
+            Document::Bool(true),
+            Document::Null,
+        ]))
+    );
+}
+
+#[tokio::test]
+async fn a_trial_needs_a_session_and_its_runtime() {
+    let config = aws_config::SdkConfig::builder()
+        .behavior_version(aws_config::BehaviorVersion::latest())
+        .build();
+    let evaluator = AgentCore::new(&config).evaluator("Builtin.Correctness");
+    let case = Case::new("c", "hi");
+    let error = evaluator
+        .evaluate(&case, &Trial::new("c", 1, "hello"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no session id"), "{error}");
+
+    let mut trial = Trial::new("c", 1, "hello");
+    trial.session_id = Some("elsewhere".into());
+    let error = evaluator.evaluate(&case, &trial).await.unwrap_err();
+    assert!(error.to_string().contains("runtime_log_group"), "{error}");
+
+    trial.error = Some("boom".into());
+    let score = evaluator.evaluate(&case, &trial).await.unwrap();
+    assert!(!score.passed);
+}

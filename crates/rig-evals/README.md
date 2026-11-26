@@ -90,10 +90,62 @@ run's trace.
 
 ## Providers
 
-Phase 2 adds adapters: AWS Bedrock AgentCore evaluators as remote `Evaluator`s, and
-Langfuse scores as a `Sink`.
+### AWS Bedrock AgentCore
+
+With the `agentcore` feature, an agent deployed on AgentCore Runtime is a target, and
+AgentCore Evaluations' evaluators (`Builtin.Correctness`, `Builtin.Helpfulness`,
+`Builtin.GoalSuccessRate`, the trajectory matchers, or a custom evaluator id) are
+evaluators. They follow AWS's
+[on-demand evaluation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/getting-started-on-demand.html)
+flow:
+
+1. `AgentCoreTarget` invokes the runtime (`InvokeAgentRuntime`, HTTP protocol, payload
+   `{"prompt": <input>}`) in a fresh session per trial and answers the reply's `response`.
+   The trial carries the session id.
+2. `AgentCoreEvaluator` waits for the session's spans in CloudWatch Logs: it queries
+   `aws/spans` and the runtime's `/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint>`
+   group with Logs Insights every 10 seconds, up to 5 minutes, until an `invoke_agent`
+   span is in and the span count stops growing.
+3. It sends the spans to `Evaluate` with the case's references: `assertions` and the tool
+   names of the `trajectory` for the session, `expected` for the last invocation's trace.
+   The score is the mean of the results (one per trace for trace-level evaluators), with
+   their labels and explanations; it passes at the threshold (0.5 unless set). A result
+   that is an error makes an error score.
+
+The spans are downloaded once per session and shared by every AgentCore evaluator of the
+same `AgentCore`.
+
+```rust
+use rig_evals::{AgentCore, Dataset, Experiment, Markdown, evaluators};
+
+let agentcore = AgentCore::from_env().await; // or AgentCore::new(&sdk_config)
+let report = Experiment::new("rig-lab")
+    .dataset(Dataset::load("evals/math.jsonl")?)
+    .target(agentcore.target("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-AbCdE12345"))
+    .evaluator(agentcore.evaluator("Builtin.Correctness").threshold(0.8))
+    .evaluator(agentcore.evaluator("Builtin.Helpfulness"))
+    .evaluator(evaluators::no_error())
+    .sink(Markdown::stdout())
+    .run()
+    .await?;
+```
+
+The agent must leave spans AgentCore Evaluations can read: deploy it with
+[rig-agentcore](../rig-agentcore), export with [rig-otel](../rig-otel)'s `aws` feature,
+and record content (`record_content(true)`), so the spans carry the prompts and answers.
+Transaction Search must be on in the account.
+
+The caller needs `bedrock-agentcore:InvokeAgentRuntime` on the runtime,
+`bedrock-agentcore:Evaluate`, and `logs:StartQuery` and `logs:GetQueryResults` on both log
+groups. `.ingestion_timeout`, `.poll_interval` and `.runtime_log_group` (for trials of
+another target, given a session id) tune the evaluator; `.qualifier` picks another
+runtime endpoint.
+
+Langfuse scores as a `Sink` come next.
 
 ## Testing
 
 `cargo test --all-features` runs keyless: agents on scripted models, a scripted judge, and
-in-memory OpenTelemetry exporters for the evaluation events.
+in-memory OpenTelemetry exporters for the evaluation events. The AgentCore suite runs
+against a real runtime only when `RIG_EVALS_AGENTCORE_RUNTIME_ARN` is set (with AWS
+credentials and region), and skips otherwise.

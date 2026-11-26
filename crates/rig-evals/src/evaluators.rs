@@ -26,7 +26,7 @@ mod judge;
 pub use judge::{LlmJudge, Verdict};
 
 /// A failed score when the target failed.
-fn target_failed(name: &str, trial: &Trial) -> Option<Score> {
+pub(crate) fn target_failed(name: &str, trial: &Trial) -> Option<Score> {
     trial
         .error
         .as_ref()

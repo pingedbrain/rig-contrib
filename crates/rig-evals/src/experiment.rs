@@ -208,6 +208,7 @@ impl Experiment {
                     trial.output = output.output;
                     trial.tool_calls = output.tool_calls;
                     trial.usage = output.usage;
+                    trial.session_id = output.session_id;
                 }
                 Err(error) => trial.error = Some(error.to_string()),
             }

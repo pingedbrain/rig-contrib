@@ -57,6 +57,8 @@ pub struct TargetOutput {
     pub tool_calls: Vec<ToolCall>,
     /// The model tokens spent.
     pub usage: Usage,
+    /// The session the run belongs to, for evaluators that read its traces.
+    pub session_id: Option<String>,
 }
 
 impl TargetOutput {
@@ -79,6 +81,13 @@ impl TargetOutput {
     #[must_use]
     pub fn with_usage(mut self, usage: Usage) -> Self {
         self.usage = usage;
+        self
+    }
+
+    /// Record the session the run belongs to.
+    #[must_use]
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
         self
     }
 }

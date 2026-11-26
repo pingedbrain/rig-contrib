@@ -1,5 +1,6 @@
 //! The integration tests of rig-evals, one module per suite, linked into one
-//! binary. Scripted models: no keys, no network.
+//! binary. Scripted models: no keys, no network (except the AgentCore suite,
+//! which skips unless pointed at a runtime).
 
 // Tests may fail loudly, as unit tests may (see the crate root); indexing
 // still goes through `.get(..)`.
@@ -10,6 +11,8 @@
     clippy::unreachable
 )]
 
+#[cfg(feature = "agentcore")]
+mod agentcore;
 mod dataset;
 mod evaluators;
 mod experiment;

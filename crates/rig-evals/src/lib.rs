@@ -22,6 +22,9 @@
 //! # }
 //! ```
 //!
+//! With the `agentcore` feature, `AgentCore` makes a runtime on AWS Bedrock
+//! AgentCore a target, and AgentCore Evaluations' evaluators evaluators.
+//!
 //! Each run is a `tracing` span `eval.trial` inside an `eval.experiment` span,
 //! and each score an OpenTelemetry GenAI `gen_ai.evaluation.result` event on
 //! it, so a tracing exporter (such as rig-otel) puts the results on the
@@ -38,6 +41,8 @@
     )
 )]
 
+#[cfg(feature = "agentcore")]
+mod agentcore;
 mod case;
 mod evaluator;
 pub mod evaluators;
@@ -46,6 +51,8 @@ mod report;
 mod sink;
 mod target;
 
+#[cfg(feature = "agentcore")]
+pub use agentcore::{AgentCore, AgentCoreError, AgentCoreEvaluator, AgentCoreTarget};
 pub use case::{Case, Dataset, DatasetError, ExpectedCall};
 pub use evaluator::{EvalError, Evaluator, Named, Score};
 pub use evaluators::{LlmJudge, Verdict};

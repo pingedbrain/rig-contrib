@@ -28,6 +28,10 @@ pub struct Trial {
     /// Why the target failed, if it did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The session the target ran in, when it reports one (an AgentCore
+    /// runtime does): remote evaluators look up the run's traces by it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl Trial {
@@ -42,6 +46,7 @@ impl Trial {
             usage: Usage::default(),
             latency: Duration::ZERO,
             error: None,
+            session_id: None,
         }
     }
 }

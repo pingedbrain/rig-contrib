@@ -18,5 +18,9 @@ First release.
 - `Report`: per-evaluator pass rate and mean, tokens, latency p50 and p95, thresholds,
   `passed()` for CI; as JSON, JUnit XML or Markdown, through the `JsonFile`, `JunitFile`
   and `Markdown` sinks.
+- AWS Bedrock AgentCore (feature `agentcore`): `AgentCoreTarget` invokes a runtime in a
+  fresh session per trial; `AgentCoreEvaluator` reads the session's spans from CloudWatch
+  Logs and scores them with AgentCore Evaluations (built-in or custom evaluators), with
+  the case's references. `Trial` and `TargetOutput` carry an optional `session_id`.
 - `eval.experiment` and `eval.trial` spans, and a `gen_ai.evaluation.result` event per
   score (OpenTelemetry GenAI semantic conventions).
