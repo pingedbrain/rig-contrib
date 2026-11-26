@@ -2,7 +2,7 @@
 
 Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
-## 0.47.0 (unreleased)
+## 0.47.0 (2026-11-26)
 
 First release.
 
