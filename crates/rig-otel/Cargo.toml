@@ -1,0 +1,38 @@
+[package]
+name = "rig-otel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "OpenTelemetry for Rig agents in one call: traces, GenAI metrics, sessions and trace context across processes, in the shape AWS Bedrock AgentCore reads."
+keywords = ["rig", "opentelemetry", "tracing", "agents", "llm"]
+categories = ["development-tools::debugging"]
+
+[features]
+# The OTLP exporters `init()` uses by default. Crates that only carry trace
+# context across processes (rig-a2a, rig-mcp-server) leave it out.
+default = ["otlp"]
+otlp = ["dep:opentelemetry-otlp"]
+
+[dependencies]
+http = "1"
+opentelemetry = "0.32"
+opentelemetry-http = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "http-proto", "http-json", "reqwest-blocking-client"], optional = true }
+opentelemetry_sdk = "0.32"
+thiserror = "2"
+tracing = "0.1"
+tracing-opentelemetry = "0.33"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "registry"] }
+
+[dev-dependencies]
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+serde_json = "1"
+tokio = { version = "1.54.1", features = ["full"] }
+
+[lints]
+workspace = true
