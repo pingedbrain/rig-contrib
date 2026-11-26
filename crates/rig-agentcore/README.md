@@ -22,7 +22,7 @@ rig_agentcore::AgentCoreApp::new(agent)
   conversation; each session's messages are kept and sent with its next invocation.
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
-  [`rig-otel`](../rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
+  [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
   is what AgentCore Observability and AgentCore Evaluations read.
 - **Content:** `record_content(true)` records prompts and replies on the GenAI spans.
   AgentCore Evaluations needs them to judge a session; they are off by default, as in

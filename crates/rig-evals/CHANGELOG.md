@@ -2,6 +2,11 @@
 
 Versions follow Rig's: rig-evals 0.47.x works with Rig 0.47.
 
+## 0.47.2 (2026-11-26)
+
+- docs.rs documents every feature, each item marked with the feature it needs.
+- Links between the crates' READMEs point to crates.io, so they work there.
+
 ## 0.47.0 (2026-11-26)
 
 First release.

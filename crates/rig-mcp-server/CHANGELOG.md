@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
+## 0.47.2 (2026-11-26)
+
+- docs.rs documents every feature, each item marked with the feature it needs.
+
 ## 0.47.0 (2026-11-26)
 
 First release.

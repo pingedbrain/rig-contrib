@@ -2,6 +2,11 @@
 
 Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
+## 0.47.2 (2026-11-26)
+
+- docs.rs documents every feature, each item marked with the feature it needs.
+- Same version as the other crates again.
+
 ## 0.47.1 (2026-11-26)
 
 - Update the official A2A Rust SDK to a2a-server-lf 0.6 and a2a-client-lf 0.3 (a2a-pb

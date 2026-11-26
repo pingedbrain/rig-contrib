@@ -85,7 +85,7 @@ The experiment is an `eval.experiment` span, and each trial an `eval.trial` span
 `gen_ai.evaluation.score.value`, `gen_ai.evaluation.score.label` (the label, or
 `pass`/`fail`) and `gen_ai.evaluation.explanation`: the event of the OpenTelemetry GenAI
 semantic conventions (development status). The crate only emits `tracing` data; with
-[rig-otel](../rig-otel) installed, any OTel backend shows the results on the evaluated
+[rig-otel](https://crates.io/crates/rig-otel) installed, any OTel backend shows the results on the evaluated
 run's trace.
 
 ## Providers
@@ -131,7 +131,7 @@ let report = Experiment::new("rig-lab")
 ```
 
 The agent must leave spans AgentCore Evaluations can read: deploy it with
-[rig-agentcore](../rig-agentcore), export with [rig-otel](../rig-otel)'s `aws` feature,
+[rig-agentcore](https://crates.io/crates/rig-agentcore), export with [rig-otel](https://crates.io/crates/rig-otel)'s `aws` feature,
 and record content (`record_content(true)`), so the spans carry the prompts and answers.
 Transaction Search must be on in the account.
 
