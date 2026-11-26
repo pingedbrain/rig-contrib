@@ -225,6 +225,7 @@ impl AgentHook for Journal {
         };
         let entry = state.unreplayed.remove(at);
         state.replaying.insert(event.id, entry.result);
+        tracing::info!(tool = %name, "tool call replayed from the journal");
         // The call does not reach the tool; on_outcome answers it.
         DispatchAction::skip("replayed from the run's journal")
     }
