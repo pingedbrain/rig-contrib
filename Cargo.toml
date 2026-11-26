@@ -1,0 +1,28 @@
+[package]
+name = "rig-multiagent"
+version = "0.47.0"
+publish = false
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+readme = "README.md"
+description = "Multi-agent patterns for Rig: a Swarm of agents that hand work to each other, and a Graph of agents and functions with conditional edges and parallel branches."
+repository = "https://github.com/pingedbrain/rig-multiagent"
+keywords = ["rig", "agents", "multi-agent", "swarm", "llm"]
+categories = ["asynchronous"]
+
+[dependencies]
+futures = "0.3"
+rig-agent = { version = "0.47", default-features = false }
+rig-core = { version = "0.47", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1.54.1", features = ["time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+anyhow = "1.0.105"
+tokio = { version = "1.54.1", features = ["full"] }
+rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
