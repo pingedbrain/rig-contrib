@@ -9,6 +9,7 @@ use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_core::completion::Usage;
 
 use crate::events::stream_agent;
+use crate::human::{Question, answer};
 
 /// Why a node failed.
 pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
@@ -49,22 +50,72 @@ pub trait Node: Send + Sync {
     /// Run the step on `input`.
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>>;
 
-    /// Run the step, passing `on_text` the text it produces as it writes it;
-    /// what a [streamed](crate::Graph::stream) graph runs. Defaults to
-    /// [`run`](Self::run): a step with nothing to stream reports its output
-    /// when it finishes.
+    /// Run the step in a [streamed](crate::Graph::stream) run, which can
+    /// report the text it writes as it writes it and ask a person, through
+    /// `io`. Defaults to [`run`](Self::run): a step with nothing to stream
+    /// reports its output when it finishes.
     fn run_streaming<'a>(
         &'a self,
         input: String,
-        on_text: OnText<'a>,
+        io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
-        let _ = on_text;
+        let _ = io;
         self.run(input)
     }
 }
 
-/// Called with each piece of text a node writes, as it writes it.
-pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
+/// What a node can do in a streamed run: report text, and ask a person.
+pub struct NodeIo<'a> {
+    node: &'a str,
+    text: &'a (dyn Fn(&str) + Send + Sync),
+    question: &'a (dyn Fn(Question) + Send + Sync),
+}
+
+impl<'a> NodeIo<'a> {
+    /// The node `node`'s view: its text goes to `text`, its questions to
+    /// `question`. A graph builds these; build one to drive a node yourself.
+    pub fn new(
+        node: &'a str,
+        text: &'a (dyn Fn(&str) + Send + Sync),
+        question: &'a (dyn Fn(Question) + Send + Sync),
+    ) -> Self {
+        Self {
+            node,
+            text,
+            question,
+        }
+    }
+
+    /// The node's id.
+    pub fn node(&self) -> &str {
+        self.node
+    }
+
+    /// Report text the node wrote.
+    pub fn text(&self, text: &str) {
+        (self.text)(text);
+    }
+
+    /// Ask a person `question` about `context`, and wait for the answer.
+    pub async fn ask(
+        &self,
+        question: impl Into<String>,
+        context: impl Into<String>,
+    ) -> Result<String, NodeError> {
+        let (question, reply) = Question::new(self.node, question, context);
+        (self.question)(question);
+        answer(reply).await
+    }
+
+    /// Pass on a question from inside the node (a nested swarm's agent).
+    pub(crate) fn forward(&self, question: Question) {
+        (self.question)(question.via(self.node));
+    }
+
+    pub(crate) fn text_sink(&self) -> &'a (dyn Fn(&str) + Send + Sync) {
+        self.text
+    }
+}
 
 impl Node for Agent {
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
@@ -78,12 +129,12 @@ impl Node for Agent {
     fn run_streaming<'a>(
         &'a self,
         input: String,
-        on_text: OnText<'a>,
+        io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let meter = Meter::default();
             let runner = self.prompt(input).add_hook(meter.clone());
-            let response = stream_agent(runner, on_text).await?;
+            let response = stream_agent(runner, io.text_sink()).await?;
             Ok(NodeOutput::new(response.output()).with_usage(meter.total()))
         })
     }

@@ -14,14 +14,20 @@ use rig_core::completion::Usage;
 use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::BuildError;
 use crate::events::{Emit, events, stream_agent};
-use crate::node::{Meter, Node, NodeError, NodeOutput, OnText};
+use crate::human::{Clock, Question, answer};
+use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput};
 
 /// The name of the tool a swarm gives each of its agents.
 pub const HANDOFF_TOOL: &str = "handoff_to_agent";
+
+/// The name of the tool a swarm that [allows questions](SwarmBuilder::allow_questions)
+/// gives its agents.
+pub const ASK_TOOL: &str = "ask_human";
 
 /// A team of agents that pass the work to each other.
 ///
@@ -45,6 +51,7 @@ struct Inner {
     execution_timeout: Duration,
     agent_timeout: Duration,
     repetition: Option<Repetition>,
+    questions: bool,
 }
 
 struct Member {
@@ -68,6 +75,7 @@ pub struct SwarmBuilder {
     execution_timeout: Duration,
     agent_timeout: Duration,
     repetition: Option<Repetition>,
+    questions: bool,
 }
 
 impl Swarm {
@@ -80,6 +88,7 @@ impl Swarm {
             execution_timeout: Duration::from_secs(15 * 60),
             agent_timeout: Duration::from_secs(5 * 60),
             repetition: None,
+            questions: false,
         }
     }
 }
@@ -127,6 +136,16 @@ impl SwarmBuilder {
         self
     }
 
+    /// Give the agents an [`ask_human`](ASK_TOOL) tool, to ask the person
+    /// behind a [streamed](Swarm::stream) run for a decision or a fact. The
+    /// agent waits for the answer within its turn, and the run's timeouts
+    /// stop meanwhile. In a plain run nobody can answer, and the tool says
+    /// so to the agent.
+    pub fn allow_questions(mut self) -> Self {
+        self.questions = true;
+        self
+    }
+
     /// Check the agents and give each one the handoff tool.
     pub fn build(self) -> Result<Swarm, BuildError> {
         if self.agents.is_empty() {
@@ -151,9 +170,12 @@ impl SwarmBuilder {
                 .position(|member| &member.name == name)
                 .ok_or_else(|| BuildError::UnknownName(name.clone()))?,
         };
-        if members.len() > 1 {
-            for member in &members {
+        for member in &members {
+            if members.len() > 1 {
                 member.agent.tool_server_handle().add_tool(HandoffTool);
+            }
+            if self.questions {
+                member.agent.tool_server_handle().add_tool(AskTool);
             }
         }
         Ok(Swarm {
@@ -164,6 +186,7 @@ impl SwarmBuilder {
                 execution_timeout: self.execution_timeout,
                 agent_timeout: self.agent_timeout,
                 repetition: self.repetition,
+                questions: self.questions,
             }),
         })
     }
@@ -271,6 +294,9 @@ pub enum SwarmEvent {
     },
     /// An agent passed the work on.
     Handoff(Handoff),
+    /// An agent asks a person; it waits for the [answer](Question::answer),
+    /// and the run's timeouts stop meanwhile. See [`SwarmBuilder::allow_questions`].
+    Question(Question),
     /// The run ended: the last event. Boxed, so the many text events stay small.
     Finished(Box<Result<SwarmRun, SwarmError>>),
 }
@@ -350,7 +376,7 @@ impl Swarm {
     ) -> Result<SwarmRun, SwarmError> {
         let inner = &*self.inner;
         let started = Instant::now();
-        let deadline = started + inner.execution_timeout;
+        let clock = Clock::start();
         let mut trail = Trail::default();
         let mut current = inner.entry;
         let mut message: Option<String> = None;
@@ -369,7 +395,7 @@ impl Swarm {
             }
             let budget = inner
                 .agent_timeout
-                .min(deadline.saturating_duration_since(Instant::now()));
+                .min(inner.execution_timeout.saturating_sub(clock.active()));
             let input = self.input(current, &task, message.as_deref(), &trail);
             let turn = Arc::new(Turn {
                 agent: member.name.clone(),
@@ -380,6 +406,7 @@ impl Swarm {
                     .map(|other| other.name.clone())
                     .collect(),
                 handoff: Mutex::new(None),
+                questions: Mutex::new(None),
             });
             let meter = Meter::default();
             let runner = member
@@ -401,18 +428,32 @@ impl Swarm {
                         text: text.to_owned(),
                     })
                 };
-                stream_agent(runner, &on_text).await
+                // Questions the agent's tool asks reach the run's reader
+                // while the agent waits.
+                let (asks, mut asked) = mpsc::unbounded_channel();
+                if inner.questions {
+                    *turn.asks() = Some(asks);
+                }
+                let mut agent = std::pin::pin!(stream_agent(runner, &on_text));
+                loop {
+                    tokio::select! {
+                        outcome = &mut agent => break outcome,
+                        Some(question) = asked.recv() => {
+                            emit(SwarmEvent::Question(question.pausing(&clock)));
+                        }
+                    }
+                }
             }
             .instrument(tracing::info_span!("swarm.agent", swarm.agent = %member.name));
-            let outcome = tokio::time::timeout(budget, run).await;
+            let outcome = clock.within(budget, run).await;
             trail.usage += meter.total();
             let handoff = turn.take();
             match (outcome, handoff) {
-                (Err(_elapsed), _) => {
+                (None, _) => {
                     let agent = member.name.clone();
                     return Err(trail.fail(SwarmFailure::Timeout { agent }));
                 }
-                (Ok(_), Some(handoff)) => {
+                (Some(_), Some(handoff)) => {
                     if trail.handoffs.len() >= inner.max_handoffs {
                         let limit = inner.max_handoffs;
                         return Err(trail.fail(SwarmFailure::MaxHandoffs { limit }));
@@ -432,7 +473,7 @@ impl Swarm {
                     }
                     trail.handoffs.push(handoff);
                 }
-                (Ok(Ok(response)), None) => {
+                (Some(Ok(response)), None) => {
                     return Ok(SwarmRun {
                         answer: response.output(),
                         agent: member.name.clone(),
@@ -442,7 +483,7 @@ impl Swarm {
                         elapsed: started.elapsed(),
                     });
                 }
-                (Ok(Err(source)), None) => {
+                (Some(Err(source)), None) => {
                     let agent = member.name.clone();
                     let source = Box::new(source);
                     return Err(trail.fail(SwarmFailure::Agent { agent, source }));
@@ -499,6 +540,13 @@ impl Swarm {
                  answer is the final one."
             );
         }
+        if self.inner.questions {
+            let _ = write!(
+                text,
+                "\n\nIf you need a decision or a fact only the user has, call {ASK_TOOL} \
+                 with your question and wait for the answer."
+            );
+        }
         text.trim_end().to_owned()
     }
 }
@@ -511,17 +559,18 @@ impl Node for Swarm {
         })
     }
 
-    /// Streams every agent's text, handing-off turns included.
+    /// Streams every agent's text, handing-off turns included, and passes on
+    /// their questions.
     fn run_streaming<'a>(
         &'a self,
         input: String,
-        on_text: OnText<'a>,
+        io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
-            let emit = |event| {
-                if let SwarmEvent::Text { text, .. } = event {
-                    on_text(&text);
-                }
+            let emit = |event| match event {
+                SwarmEvent::Text { text, .. } => io.text(&text),
+                SwarmEvent::Question(question) => io.forward(question),
+                _ => {}
             };
             let run = self.run_task(input, Some(&emit)).await?;
             Ok(NodeOutput::new(run.answer).with_usage(run.usage))
@@ -534,9 +583,17 @@ struct Turn {
     agent: String,
     others: Vec<String>,
     handoff: Mutex<Option<Handoff>>,
+    /// Where the ask tool sends questions; `None` when nobody can answer.
+    questions: Mutex<Option<mpsc::UnboundedSender<Question>>>,
 }
 
 impl Turn {
+    fn asks(&self) -> std::sync::MutexGuard<'_, Option<mpsc::UnboundedSender<Question>>> {
+        self.questions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Handoff>> {
         self.handoff.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -629,6 +686,63 @@ impl Tool for HandoffTool {
             context: args.context.filter(|context| !context.is_null()),
         });
         Ok(reply)
+    }
+}
+
+#[derive(Deserialize)]
+struct AskArgs {
+    question: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum AskError {
+    #[error("{ASK_TOOL} works only during a swarm run")]
+    NotInSwarm,
+    #[error("nobody can answer questions in this run; decide on your own")]
+    Nobody,
+    #[error("{0}; decide on your own")]
+    Unanswered(NodeError),
+}
+
+/// The tool a swarm that allows questions adds to its agents: it sends the
+/// question to the run's reader and waits for the answer, within the turn.
+struct AskTool;
+
+impl Tool for AskTool {
+    const NAME: &'static str = ASK_TOOL;
+    type Args = AskArgs;
+    type Output = String;
+    type Error = AskError;
+
+    fn description(&self) -> String {
+        "Ask the user a question (a decision, a missing fact, an approval) and wait for the \
+         answer."
+            .into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question, standing on its own."}
+            },
+            "required": ["question"]
+        })
+    }
+
+    fn map_error(&self, error: AskError) -> ToolExecutionError {
+        let feedback = error.to_string();
+        ToolExecutionError::from_error(error).with_model_feedback(feedback)
+    }
+
+    async fn call(&self, context: &mut ToolContext, args: AskArgs) -> Result<String, AskError> {
+        let turn = context.scope::<Turn>().ok_or(AskError::NotInSwarm)?;
+        let (question, reply) = Question::new(turn.agent.clone(), args.question, "");
+        let sent = turn.asks().as_ref().map(|asks| asks.send(question));
+        if !matches!(sent, Some(Ok(()))) {
+            return Err(AskError::Nobody);
+        }
+        answer(reply).await.map_err(AskError::Unanswered)
     }
 }
 

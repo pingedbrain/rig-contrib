@@ -133,6 +133,51 @@ swarm or graph used as a graph node streams its agents' text under that node. A 
 `Node` streams by implementing `run_streaming`; by default it reports only its output.
 The run advances only while the stream is polled, and dropping the stream stops it.
 
+## A person in the loop
+
+A streamed run can stop to ask a person: to approve a step, pick an option, or supply a
+fact. The question arrives as a `Question` event; the part of the run that asked waits
+until you answer it, and time spent waiting does not count against the run's timeouts.
+
+```rust
+let mut events = graph.stream("Ship the release");
+while let Some(event) = events.next().await {
+    match event {
+        GraphEvent::Question(question) => {
+            println!("{} asks: {}\n{}", question.from(), question.question(), question.context());
+            question.answer(read_line()); // dropping it unanswered fails the asker
+        }
+        GraphEvent::Finished(outcome) => { /* ... */ }
+        _ => {}
+    }
+}
+```
+
+- **In a graph**, `human(question)` is a node that asks, with its input as the
+  question's context, and outputs the answer. Conditional edges act on it; to gate work,
+  put the condition on the edges into the gated node, from the human node and from the
+  work it needs:
+
+  ```rust
+  let approved = |state: &GraphState| state.output("approve") == Some("yes");
+  Graph::builder()
+      .node("build", builder)
+      .node("approve", human("Deploy this release? (yes/no)"))
+      .node("deploy", deployer)
+      .edge("build", "approve")
+      .edge_if("approve", "deploy", approved)
+      .edge_if("build", "deploy", approved) // deploy also gets the build's output
+  ```
+
+- **In a swarm**, `allow_questions()` gives every agent an `ask_human(question)` tool.
+  The agent waits for the answer within its turn and carries on with it. In a plain
+  `run()` nobody can answer, and the tool tells the agent to decide on its own.
+- A custom `Node` asks through `NodeIo::ask` in `run_streaming`.
+- Questions from a swarm or graph nested in a graph come out of the outer run, named by
+  where they came from (`team/planner`).
+
+A run waits in memory for its answers; resuming a run after a restart is not supported.
+
 ## Tracing
 
 Runs are `swarm.run` / `graph.run` spans, with a `swarm.agent` or `graph.node` span per
@@ -145,8 +190,8 @@ semantics where they overlap: the handoff tool and the context it builds, the li
 the repetition check, batch execution, conditional edges, input from dependencies,
 pruning of failed branches, and nesting. Differences: a handoff ends the agent's turn
 at once; a cyclic graph needs an execution bound; edge conditions are plain closures
-over the run state. Not here (yet): interrupts (human-in-the-loop) and resuming a run
-from a snapshot.
+over the run state; a person is asked through a stream event rather than an interrupt
+that ends the run. Not here (yet): resuming a run from a snapshot, after a restart.
 
 ## Testing
 
@@ -154,4 +199,5 @@ from a snapshot.
 with no keys or network: handoffs, shared context, refused handoffs, every limit,
 parallel branches (timed), joins, conditional edges, review loops, failures, timeouts,
 nesting and usage accounting; streamed runs on scripted streaming models, with event
-order, nested streaming and cancellation by dropping the stream.
+order, nested streaming and cancellation by dropping the stream; approval gates, agents
+asking, dismissed questions, and timeouts that stop while a person thinks.

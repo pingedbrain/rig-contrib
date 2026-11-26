@@ -15,5 +15,8 @@ First release.
 - `Swarm::stream` and `Graph::stream`: turns or nodes starting and finishing, the text
   agents write as they write it, handoffs, and the outcome last; nested swarms and graphs
   stream their text; dropping the stream stops the run.
+- A person in the loop: `Question` events in streamed runs; `human(question)` graph
+  nodes; `SwarmBuilder::allow_questions` and the `ask_human` tool; `NodeIo::ask` for
+  custom nodes. Time waiting for an answer does not count against timeouts.
 - Token usage of every model call, stopped turns included; tracing spans per run and
   per turn or node.

@@ -40,13 +40,16 @@
 
 mod events;
 mod graph;
+mod human;
 mod node;
 mod swarm;
 
 pub use graph::{Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState};
-pub use node::{FnNode, Node, NodeError, NodeOutput, OnText, node_fn};
+pub use human::{HumanNode, Question, human};
+pub use node::{FnNode, Node, NodeError, NodeIo, NodeOutput, node_fn};
 pub use swarm::{
-    HANDOFF_TOOL, Handoff, Swarm, SwarmBuilder, SwarmError, SwarmEvent, SwarmFailure, SwarmRun,
+    ASK_TOOL, HANDOFF_TOOL, Handoff, Swarm, SwarmBuilder, SwarmError, SwarmEvent, SwarmFailure,
+    SwarmRun,
 };
 
 /// Why a [`Swarm`] or [`Graph`] could not be built.

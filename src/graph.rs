@@ -12,7 +12,8 @@ use tracing::Instrument;
 
 use crate::BuildError;
 use crate::events::{Emit, events};
-use crate::node::{Node, NodeError, NodeOutput, OnText};
+use crate::human::{Clock, Question};
+use crate::node::{Node, NodeError, NodeIo, NodeOutput};
 
 type Condition = Arc<dyn Fn(&GraphState) -> bool + Send + Sync>;
 
@@ -362,6 +363,9 @@ pub enum GraphEvent {
         /// Why.
         error: String,
     },
+    /// A node asks a person; the node waits for the [answer](Question::answer),
+    /// and the run's timeouts stop meanwhile.
+    Question(Question),
     /// The run ended: the last event. Boxed, so the many text events stay small.
     Finished(Box<Result<GraphRun, GraphError>>),
 }
@@ -431,7 +435,8 @@ impl Graph {
     ) -> Result<GraphRun, GraphError> {
         let inner = &*self.inner;
         let started = Instant::now();
-        let deadline = started + inner.execution_timeout;
+        let clock = Clock::start();
+        let clock = &clock;
         let mut state = GraphState {
             task,
             ..GraphState::default()
@@ -448,7 +453,7 @@ impl Graph {
                 failures.push(GraphFailure::MaxNodeExecutions { limit });
                 break;
             }
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            let remaining = inner.execution_timeout.saturating_sub(clock.active());
             if remaining.is_zero() {
                 failures.push(GraphFailure::Timeout);
                 break;
@@ -462,7 +467,7 @@ impl Graph {
                 async move {
                     let Some(emit) = emit else {
                         let run = node.node.run(input).instrument(span);
-                        return (index, tokio::time::timeout(budget, run).await);
+                        return (index, clock.within(budget, run).await);
                     };
                     emit(GraphEvent::NodeStarted {
                         node: node.id.clone(),
@@ -473,19 +478,22 @@ impl Graph {
                             text: text.to_owned(),
                         })
                     };
-                    let run = node.node.run_streaming(input, &on_text).instrument(span);
-                    let outcome = tokio::time::timeout(budget, run).await;
+                    let on_question =
+                        |question: Question| emit(GraphEvent::Question(question.pausing(clock)));
+                    let io = NodeIo::new(&node.id, &on_text, &on_question);
+                    let run = node.node.run_streaming(input, &io).instrument(span);
+                    let outcome = clock.within(budget, run).await;
                     let node = node.id.clone();
                     emit(match &outcome {
-                        Ok(Ok(output)) => GraphEvent::NodeFinished {
+                        Some(Ok(output)) => GraphEvent::NodeFinished {
                             node,
                             output: output.text.clone(),
                         },
-                        Ok(Err(error)) => GraphEvent::NodeFailed {
+                        Some(Err(error)) => GraphEvent::NodeFailed {
                             node,
                             error: error.to_string(),
                         },
-                        Err(_elapsed) => GraphEvent::NodeFailed {
+                        None => GraphEvent::NodeFailed {
                             node,
                             error: "did not finish in time".to_owned(),
                         },
@@ -499,7 +507,7 @@ impl Graph {
                 *state.runs.entry(id.clone()).or_default() += 1;
                 state.order.push(id.clone());
                 match outcome {
-                    Ok(Ok(output)) => {
+                    Some(Ok(output)) => {
                         let NodeOutput {
                             text, usage: spent, ..
                         } = output;
@@ -507,11 +515,11 @@ impl Graph {
                         state.outputs.insert(id, text);
                         finished.push(index);
                     }
-                    Ok(Err(source)) => {
+                    Some(Err(source)) => {
                         tracing::warn!(graph.node = %id, error = %source, "graph node failed");
                         failures.push(GraphFailure::Node { node: id, source });
                     }
-                    Err(_elapsed) => failures.push(GraphFailure::NodeTimeout { node: id }),
+                    None => failures.push(GraphFailure::NodeTimeout { node: id }),
                 }
             }
             if !finished.is_empty() {
@@ -573,17 +581,17 @@ impl Node for Graph {
         })
     }
 
-    /// Streams the text of its nodes.
+    /// Streams the text of its nodes and passes on their questions.
     fn run_streaming<'a>(
         &'a self,
         input: String,
-        on_text: OnText<'a>,
+        io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
-            let emit = |event| {
-                if let GraphEvent::Text { text, .. } = event {
-                    on_text(&text);
-                }
+            let emit = |event| match event {
+                GraphEvent::Text { text, .. } => io.text(&text),
+                GraphEvent::Question(question) => io.forward(question),
+                _ => {}
             };
             let run = self.run_task(input, Some(&emit)).await?;
             Ok(NodeOutput::new(run.answer()).with_usage(run.usage))
