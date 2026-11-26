@@ -79,7 +79,7 @@ async fn branches_run_in_parallel_and_join_once() -> anyhow::Result<()> {
     let graph = Graph::builder()
         .node("split", sleeping("split", 0))
         .node("left", sleeping("from left", 300))
-        .node("right", sleeping("from right", 300))
+        .node("right", sleeping("from right", 350))
         .node("join", join)
         .edge("split", "left")
         .edge("split", "right")

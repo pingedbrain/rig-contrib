@@ -128,11 +128,7 @@ pub fn human(question: impl Into<String>) -> HumanNode {
 }
 
 impl Node for HumanNode {
-    fn run(&self, _input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
-        Box::pin(async { Err("this node asks a person: run the graph with stream()".into()) })
-    }
-
-    fn run_streaming<'a>(
+    fn run<'a>(
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,

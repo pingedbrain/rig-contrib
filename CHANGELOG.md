@@ -20,6 +20,10 @@ First release.
   custom nodes. Time waiting for an answer does not count against timeouts.
 - Checkpoints in any rig-memory store (`checkpoints`): `run_as` / `stream_as` resume a
   run after a failure or a restart, keeping its progress, its pending questions and its
-  counted time; `Resumed` events.
+  counted time; `Resumed` events. Graphs save as each node finishes; every agent run
+  keeps a journal of its tool results (and answers from people), replayed instead of
+  run again; nested swarms and graphs resume inside their node.
+- `Node::run(input, io)` with `NodeIo` (text, questions, saving) replaces the separate
+  streaming method.
 - Token usage of every model call, stopped turns included; tracing spans per run and
   per turn or node.

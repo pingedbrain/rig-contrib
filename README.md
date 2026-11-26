@@ -130,7 +130,7 @@ while let Some(event) = events.next().await {
 
 Agents run in Rig's streaming mode, so their text arrives as the model writes it; a
 swarm or graph used as a graph node streams its agents' text under that node. A custom
-`Node` streams by implementing `run_streaming`; by default it reports only its output.
+`Node` streams through `NodeIo::text`; one that does not reports only its output.
 The run advances only while the stream is polled, and dropping the stream stops it.
 
 ## A person in the loop
@@ -172,7 +172,7 @@ while let Some(event) = events.next().await {
 - **In a swarm**, `allow_questions()` gives every agent an `ask_human(question)` tool.
   The agent waits for the answer within its turn and carries on with it. In a plain
   `run()` nobody can answer, and the tool tells the agent to decide on its own.
-- A custom `Node` asks through `NodeIo::ask` in `run_streaming`.
+- A custom `Node` asks through `NodeIo::ask`.
 - Questions from a swarm or graph nested in a graph come out of the outer run, named by
   where they came from (`team/planner`).
 
@@ -195,18 +195,31 @@ let run = graph.run_as("release-1.2", "Ship 1.2").await?;
 
 - A swarm saves before every turn; a resumed run starts with the turn it was on,
   keeping the handoffs, shared context and usage before it.
-- A graph saves before every batch and at the end; a resumed run starts with the
-  batch it was on, and a run that ended with failed nodes runs those nodes again (a
-  transient provider error, say) without redoing the rest.
-- A question waiting for a person survives: the resumed run asks it again, so the answer
-  can come from another process, hours later.
+- A graph saves as each node finishes and at the end; a resumed run runs only the
+  nodes that had not finished (a parallel batch cut short keeps its finished nodes), and
+  a run that ended with failed nodes runs those nodes again (a transient provider error,
+  say) without redoing the rest.
+- **Tools run once.** Every agent run (a swarm turn, an agent node) keeps a journal of
+  its successful tool results. When a cut-short turn or node runs again and its model asks
+  for the same tool with the same arguments, it gets the recorded result and the tool does
+  not run: the mail is not sent twice. A call with other arguments runs for real; a call
+  that failed runs again; the swarm's handoff always runs.
+- **Answers are kept.** A person's answer to `ask_human` is in the journal too, so a
+  resumed turn does not ask again. A question still waiting survives a restart: the
+  resumed run asks it again, so the answer can come from another process, hours later.
+- **Nested runs resume inside.** A swarm or graph node keeps its own progress, in its own
+  store or else its parent's, under an id derived from the parent run and the node; when
+  the node runs again, it resumes where it was rather than starting over.
 - The time a run had counted carries over, so its timeouts still hold.
 - A streamed resumed run starts with a `Resumed` event.
 
-A turn or batch that was cut short runs again from its start, tools included, so tools
-with side effects should be safe to repeat. A nested swarm or graph node starts over
-when its batch runs again. A run id is 1-128 of `[A-Za-z0-9_-]`; each run is one JSON
-file, `rig-multiagent/{swarm,graph}/<run_id>.json`, written atomically.
+What still repeats: the model calls of a turn or node that was cut short (their
+replies can differ, which is why a different tool call runs), and a tool call that was
+running at the moment the process died, since its result never reached the journal
+(at-least-once; give such tools an idempotency key of their own if that matters). A
+run id is 1-128 of `[A-Za-z0-9_-]`; a run is one JSON file,
+`rig-multiagent/{swarm,graph}/<run_id>.json`, plus one per journal and nested run,
+each written atomically.
 
 ## Tracing
 

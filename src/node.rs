@@ -8,6 +8,7 @@ use rig_agent::Agent;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_core::completion::Usage;
 
+use crate::checkpoint::{Journal, Saving};
 use crate::events::stream_agent;
 use crate::human::{Question, answer};
 
@@ -44,46 +45,58 @@ impl NodeOutput {
 /// One step of a [`Graph`](crate::Graph): takes the text built from the task
 /// and the outputs before it, and produces text.
 ///
-/// Implemented for Rig agents, [`Swarm`](crate::Swarm)s, [`Graph`](crate::Graph)s
-/// and, through [`node_fn`], async functions.
+/// Implemented for Rig agents, [`Swarm`](crate::Swarm)s, [`Graph`](crate::Graph)s,
+/// [`human`](crate::human) and, through [`node_fn`], async functions.
 pub trait Node: Send + Sync {
-    /// Run the step on `input`.
-    fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>>;
-
-    /// Run the step in a [streamed](crate::Graph::stream) run, which can
-    /// report the text it writes as it writes it and ask a person, through
-    /// `io`. Defaults to [`run`](Self::run): a step with nothing to stream
-    /// reports its output when it finishes.
-    fn run_streaming<'a>(
+    /// Run the step on `input`. Through `io` it can report the text it
+    /// writes and ask a person, when the graph run is
+    /// [streamed](crate::Graph::stream).
+    fn run<'a>(
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
-        let _ = io;
-        self.run(input)
-    }
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>>;
 }
 
-/// What a node can do in a streamed run: report text, and ask a person.
+/// What a node can do while it runs: report text and ask a person (in a
+/// streamed run), and keep its progress (in a checkpointed one).
 pub struct NodeIo<'a> {
     node: &'a str,
-    text: &'a (dyn Fn(&str) + Send + Sync),
-    question: &'a (dyn Fn(Question) + Send + Sync),
+    text: Option<&'a (dyn Fn(&str) + Send + Sync)>,
+    question: Option<&'a (dyn Fn(Question) + Send + Sync)>,
+    saving: Option<Saving>,
 }
 
 impl<'a> NodeIo<'a> {
-    /// The node `node`'s view: its text goes to `text`, its questions to
-    /// `question`. A graph builds these; build one to drive a node yourself.
-    pub fn new(
+    /// The view of node `node` in a plain run: its text goes nowhere, and
+    /// it cannot ask. Build one to run a node yourself.
+    pub fn quiet(node: &'a str) -> Self {
+        Self {
+            node,
+            text: None,
+            question: None,
+            saving: None,
+        }
+    }
+
+    /// The view of node `node` in a streamed run: its text goes to `text`,
+    /// its questions to `question`.
+    pub fn streaming(
         node: &'a str,
         text: &'a (dyn Fn(&str) + Send + Sync),
         question: &'a (dyn Fn(Question) + Send + Sync),
     ) -> Self {
         Self {
             node,
-            text,
-            question,
+            text: Some(text),
+            question: Some(question),
+            saving: None,
         }
+    }
+
+    pub(crate) fn saving_to(mut self, saving: Option<Saving>) -> Self {
+        self.saving = saving;
+        self
     }
 
     /// The node's id.
@@ -91,50 +104,65 @@ impl<'a> NodeIo<'a> {
         self.node
     }
 
-    /// Report text the node wrote.
+    /// Whether the run is streamed: text is reported and questions asked.
+    pub fn is_streaming(&self) -> bool {
+        self.text.is_some()
+    }
+
+    /// Report text the node wrote; nothing in a plain run.
     pub fn text(&self, text: &str) {
-        (self.text)(text);
+        if let Some(sink) = self.text {
+            sink(text);
+        }
     }
 
     /// Ask a person `question` about `context`, and wait for the answer.
+    /// Fails in a plain run, where nobody can answer.
     pub async fn ask(
         &self,
         question: impl Into<String>,
         context: impl Into<String>,
     ) -> Result<String, NodeError> {
+        let Some(ask) = self.question else {
+            return Err("this node asks a person: run the graph with stream()".into());
+        };
         let (question, reply) = Question::new(self.node, question, context);
-        (self.question)(question);
+        ask(question);
         answer(reply).await
     }
 
     /// Pass on a question from inside the node (a nested swarm's agent).
     pub(crate) fn forward(&self, question: Question) {
-        (self.question)(question.via(self.node));
+        if let Some(ask) = self.question {
+            ask(question.via(self.node));
+        }
     }
 
-    pub(crate) fn text_sink(&self) -> &'a (dyn Fn(&str) + Send + Sync) {
-        self.text
+    /// Where this run of the node keeps its progress, in a checkpointed run.
+    pub(crate) fn saving(&self) -> Option<&Saving> {
+        self.saving.as_ref()
     }
 }
 
 impl Node for Agent {
-    fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
-        Box::pin(async move {
-            let meter = Meter::default();
-            let response = self.prompt(input).add_hook(meter.clone()).run().await?;
-            Ok(NodeOutput::new(response.output()).with_usage(meter.total()))
-        })
-    }
-
-    fn run_streaming<'a>(
+    /// In a checkpointed run, the agent's tool results go to a journal, so
+    /// a resumed run replays them rather than executing the tools again.
+    fn run<'a>(
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let meter = Meter::default();
-            let runner = self.prompt(input).add_hook(meter.clone());
-            let response = stream_agent(runner, io.text_sink()).await?;
+            let mut runner = self.prompt(input).add_hook(meter.clone());
+            if let Some(saving) = io.saving() {
+                runner = runner.add_hook(Journal::open(saving.kind("journal")).await?);
+            }
+            let response = if io.is_streaming() {
+                stream_agent(runner, &|text: &str| io.text(text)).await?
+            } else {
+                runner.run().await?
+            };
             Ok(NodeOutput::new(response.output()).with_usage(meter.total()))
         })
     }
@@ -163,7 +191,11 @@ where
     F: Fn(String) -> Fut + Send + Sync,
     Fut: Future<Output = Result<String, NodeError>> + Send + 'static,
 {
-    fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
+    fn run<'a>(
+        &'a self,
+        input: String,
+        _io: &'a NodeIo<'a>,
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         let future = (self.0)(input);
         Box::pin(async move { Ok(NodeOutput::new(future.await?)) })
     }

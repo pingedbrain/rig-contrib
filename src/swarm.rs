@@ -18,7 +18,7 @@ use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::BuildError;
-use crate::checkpoint::Checkpoints;
+use crate::checkpoint::{Checkpoints, Journal, Saving};
 use crate::events::{Emit, events, stream_agent};
 use crate::human::{Clock, Question, answer};
 use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput};
@@ -345,6 +345,9 @@ struct Trail {
 struct Saved {
     task: String,
     finished: bool,
+    /// The answer, once finished.
+    #[serde(default)]
+    answer: Option<String>,
     /// The agent whose turn comes next.
     current: String,
     message: Option<String>,
@@ -373,7 +376,7 @@ impl Swarm {
     pub async fn run(&self, task: impl Into<String>) -> Result<SwarmRun, SwarmError> {
         let entry = &self.inner.members[self.inner.entry].name;
         let span = tracing::info_span!("swarm.run", swarm.entry = %entry);
-        self.run_task(task.into(), None, None)
+        self.run_task(task.into(), None, false, None)
             .instrument(span)
             .await
     }
@@ -381,7 +384,10 @@ impl Swarm {
     /// Run the swarm as run `run_id`: resume it from its last checkpoint if
     /// it has one and did not finish, or else start it on `task`. Progress
     /// is saved before every turn, so a run that stopped (the process
-    /// restarted, an agent failed) carries on with the turn it was on.
+    /// restarted, an agent failed) carries on with the turn it was on. Each
+    /// turn keeps a journal of its tool results (answers to `ask_human`
+    /// included), so a turn run again replays them rather than running the
+    /// tools twice.
     ///
     /// Needs [`checkpoints`](SwarmBuilder::checkpoints); without them it is
     /// [`run`](Self::run). A `run_id` is 1-128 of `[A-Za-z0-9_-]`.
@@ -392,7 +398,7 @@ impl Swarm {
     ) -> Result<SwarmRun, SwarmError> {
         let entry = &self.inner.members[self.inner.entry].name;
         let span = tracing::info_span!("swarm.run", swarm.entry = %entry, swarm.run_id = %run_id);
-        self.run_task(task.into(), Some(run_id), None)
+        self.run_task(task.into(), self.saving(Some(run_id)), false, None)
             .instrument(span)
             .await
     }
@@ -447,7 +453,8 @@ impl Swarm {
                     let emit = move |event| {
                         let _ = sender.send(event);
                     };
-                    self.run_task(task, run_id, Some(&emit)).await
+                    self.run_task(task, self.saving(run_id), false, Some(&emit))
+                        .await
                 }
                 .instrument(tracing::info_span!("swarm.run", swarm.entry = %entry))
             },
@@ -455,17 +462,47 @@ impl Swarm {
         )
     }
 
+    /// Where run `run_id` keeps its progress, if the swarm has a store.
+    fn saving(&self, run_id: Option<&str>) -> Option<Saving> {
+        run_id
+            .zip(self.inner.checkpoints.clone())
+            .map(|(id, checkpoints)| Saving::new(checkpoints, id))
+    }
+
+    /// Run `task`, saving to `saving`. A `nested` run (a graph node) that
+    /// finished before answers as it did, rather than starting over: its
+    /// graph lost track of it.
     async fn run_task(
         &self,
         task: String,
-        run_id: Option<&str>,
+        saving: Option<Saving>,
+        nested: bool,
         emit: Option<Emit<'_, SwarmEvent>>,
     ) -> Result<SwarmRun, SwarmError> {
         let inner = &*self.inner;
         let started = Instant::now();
-        let checkpoints = run_id.zip(inner.checkpoints.as_ref());
+        let checkpoints = saving
+            .as_ref()
+            .map(|saving| (saving.run_id.as_str(), &saving.checkpoints));
         let saved = match checkpoints {
             Some((id, checkpoints)) => match checkpoints.load::<Saved>(id).await {
+                Ok(Some(Saved {
+                    finished: true,
+                    answer: Some(answer),
+                    current,
+                    trail,
+                    elapsed_ms,
+                    ..
+                })) if nested => {
+                    return Ok(SwarmRun {
+                        answer,
+                        agent: current,
+                        agents: trail.agents,
+                        handoffs: trail.handoffs,
+                        usage: trail.usage,
+                        elapsed: Duration::from_millis(elapsed_ms),
+                    });
+                }
                 Ok(saved) => saved.filter(|saved| !saved.finished),
                 Err(error) => {
                     return Err(Trail::default().fail(SwarmFailure::Checkpoint { error }));
@@ -512,20 +549,23 @@ impl Swarm {
                 )
             }
         };
-        let snapshot =
-            |trail: &Trail, current: &str, message: &Option<String>, finished: bool| Saved {
-                task: task.clone(),
-                finished,
-                current: current.to_owned(),
-                message: message.clone(),
-                trail: trail.clone(),
-                active_ms: millis(clock.active()),
-                elapsed_ms: millis(before + started.elapsed()),
-            };
+        let snapshot = |trail: &Trail,
+                        current: &str,
+                        message: &Option<String>,
+                        answer: Option<String>| Saved {
+            task: task.clone(),
+            finished: answer.is_some(),
+            answer,
+            current: current.to_owned(),
+            message: message.clone(),
+            trail: trail.clone(),
+            active_ms: millis(clock.active()),
+            elapsed_ms: millis(before + started.elapsed()),
+        };
         loop {
             let member = &inner.members[current];
             if let Some((id, checkpoints)) = checkpoints {
-                let saved = snapshot(&trail, &member.name, &message, false);
+                let saved = snapshot(&trail, &member.name, &message, None);
                 if let Err(error) = checkpoints.save(id, &saved).await {
                     return Err(trail.fail(SwarmFailure::Checkpoint { error }));
                 }
@@ -557,12 +597,21 @@ impl Swarm {
                 questions: Mutex::new(None),
             });
             let meter = Meter::default();
-            let runner = member
+            let mut runner = member
                 .agent
                 .prompt(input)
                 .tool_context(ToolContext::new().with_scope(turn.clone()))
-                .add_hook(meter.clone())
-                .add_hook(StopOnHandoff(turn.clone()));
+                .add_hook(meter.clone());
+            if let Some(saving) = &saving {
+                // A resumed turn replays the tools it ran before, answers to
+                // ask_human included, rather than running them again.
+                let journal = saving.part("journal", "turn", trail.agents.len());
+                match Journal::open(journal).await {
+                    Ok(journal) => runner = runner.add_hook(journal),
+                    Err(error) => return Err(trail.fail(SwarmFailure::Checkpoint { error })),
+                }
+            }
+            let runner = runner.add_hook(StopOnHandoff(turn.clone()));
             let run = async {
                 let Some(emit) = emit else {
                     return runner.run().await;
@@ -625,7 +674,8 @@ impl Swarm {
                     if let Some((id, checkpoints)) = checkpoints {
                         // The answer stands even if the mark is lost; the
                         // next run_as then repeats the last turn.
-                        let saved = snapshot(&trail, &member.name, &message, true);
+                        let saved =
+                            snapshot(&trail, &member.name, &message, Some(response.output()));
                         if let Err(error) = checkpoints.save(id, &saved).await {
                             tracing::warn!(%error, "could not mark the swarm run finished");
                         }
@@ -708,27 +758,29 @@ impl Swarm {
 }
 
 impl Node for Swarm {
-    fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
-        Box::pin(async move {
-            let run = Swarm::run(self, input).await?;
-            Ok(NodeOutput::new(run.answer).with_usage(run.usage))
-        })
-    }
-
     /// Streams every agent's text, handing-off turns included, and passes on
-    /// their questions.
-    fn run_streaming<'a>(
+    /// their questions. In a checkpointed graph run, the swarm keeps its own
+    /// progress (in its store, or else the graph's), so a resumed graph
+    /// resumes the swarm inside the node too.
+    fn run<'a>(
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
+            let saving = io.saving().map(|saving| {
+                let checkpoints = self.inner.checkpoints.clone();
+                let checkpoints =
+                    checkpoints.unwrap_or_else(|| saving.checkpoints.with_kind("swarm"));
+                Saving::new(checkpoints, saving.run_id.clone())
+            });
             let emit = |event| match event {
                 SwarmEvent::Text { text, .. } => io.text(&text),
                 SwarmEvent::Question(question) => io.forward(question),
                 _ => {}
             };
-            let run = self.run_task(input, None, Some(&emit)).await?;
+            let emit: Option<Emit<'_, SwarmEvent>> = io.is_streaming().then_some(&emit);
+            let run = self.run_task(input, saving, true, emit).await?;
             Ok(NodeOutput::new(run.answer).with_usage(run.usage))
         })
     }
