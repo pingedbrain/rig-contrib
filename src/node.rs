@@ -8,6 +8,8 @@ use rig_agent::Agent;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_core::completion::Usage;
 
+use crate::events::stream_agent;
+
 /// Why a node failed.
 pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -46,13 +48,42 @@ impl NodeOutput {
 pub trait Node: Send + Sync {
     /// Run the step on `input`.
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>>;
+
+    /// Run the step, passing `on_text` the text it produces as it writes it;
+    /// what a [streamed](crate::Graph::stream) graph runs. Defaults to
+    /// [`run`](Self::run): a step with nothing to stream reports its output
+    /// when it finishes.
+    fn run_streaming<'a>(
+        &'a self,
+        input: String,
+        on_text: OnText<'a>,
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+        let _ = on_text;
+        self.run(input)
+    }
 }
+
+/// Called with each piece of text a node writes, as it writes it.
+pub type OnText<'a> = &'a (dyn Fn(&str) + Send + Sync);
 
 impl Node for Agent {
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let meter = Meter::default();
             let response = self.prompt(input).add_hook(meter.clone()).run().await?;
+            Ok(NodeOutput::new(response.output()).with_usage(meter.total()))
+        })
+    }
+
+    fn run_streaming<'a>(
+        &'a self,
+        input: String,
+        on_text: OnText<'a>,
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+        Box::pin(async move {
+            let meter = Meter::default();
+            let runner = self.prompt(input).add_hook(meter.clone());
+            let response = stream_agent(runner, on_text).await?;
             Ok(NodeOutput::new(response.output()).with_usage(meter.total()))
         })
     }

@@ -6,11 +6,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::future::{BoxFuture, join_all};
+use futures::stream::BoxStream;
 use rig_core::completion::Usage;
 use tracing::Instrument;
 
 use crate::BuildError;
-use crate::node::{Node, NodeError, NodeOutput};
+use crate::events::{Emit, events};
+use crate::node::{Node, NodeError, NodeOutput, OnText};
 
 type Condition = Arc<dyn Fn(&GraphState) -> bool + Send + Sync>;
 
@@ -329,6 +331,41 @@ impl std::fmt::Display for GraphError {
     }
 }
 
+/// What a [streamed](Graph::stream) graph run reports, as it happens.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum GraphEvent {
+    /// A node started.
+    NodeStarted {
+        /// The node.
+        node: String,
+    },
+    /// Text a node wrote: what an agent's model streams, or a nested swarm's
+    /// or graph's. Nodes with nothing to stream report only their output.
+    Text {
+        /// The node.
+        node: String,
+        /// The new text.
+        text: String,
+    },
+    /// A node finished.
+    NodeFinished {
+        /// The node.
+        node: String,
+        /// Its output.
+        output: String,
+    },
+    /// A node failed or ran out of time; its branch stops.
+    NodeFailed {
+        /// The node.
+        node: String,
+        /// Why.
+        error: String,
+    },
+    /// The run ended: the last event. Boxed, so the many text events stay small.
+    Finished(Box<Result<GraphRun, GraphError>>),
+}
+
 /// Something that went wrong in a graph run.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -363,10 +400,35 @@ impl Graph {
     /// Run the graph on `task`.
     pub async fn run(&self, task: impl Into<String>) -> Result<GraphRun, GraphError> {
         let span = tracing::info_span!("graph.run");
-        self.run_task(task.into()).instrument(span).await
+        self.run_task(task.into(), None).instrument(span).await
     }
 
-    async fn run_task(&self, task: String) -> Result<GraphRun, GraphError> {
+    /// Run the graph on `task`, reporting each node as it starts, writes and
+    /// finishes, and the outcome last.
+    ///
+    /// The run makes progress only while the stream is polled, and stops
+    /// when the stream is dropped.
+    pub fn stream(&self, task: impl Into<String>) -> BoxStream<'_, GraphEvent> {
+        let task = task.into();
+        events(
+            move |sender| {
+                async move {
+                    let emit = move |event| {
+                        let _ = sender.send(event);
+                    };
+                    self.run_task(task, Some(&emit)).await
+                }
+                .instrument(tracing::info_span!("graph.run"))
+            },
+            |outcome| GraphEvent::Finished(Box::new(outcome)),
+        )
+    }
+
+    async fn run_task(
+        &self,
+        task: String,
+        emit: Option<Emit<'_, GraphEvent>>,
+    ) -> Result<GraphRun, GraphError> {
         let inner = &*self.inner;
         let started = Instant::now();
         let deadline = started + inner.execution_timeout;
@@ -398,9 +460,37 @@ impl Graph {
                 let input = self.input(index, &state);
                 let span = tracing::info_span!("graph.node", graph.node = %node.id);
                 async move {
-                    let outcome =
-                        tokio::time::timeout(budget, node.node.run(input).instrument(span));
-                    (index, outcome.await)
+                    let Some(emit) = emit else {
+                        let run = node.node.run(input).instrument(span);
+                        return (index, tokio::time::timeout(budget, run).await);
+                    };
+                    emit(GraphEvent::NodeStarted {
+                        node: node.id.clone(),
+                    });
+                    let on_text = |text: &str| {
+                        emit(GraphEvent::Text {
+                            node: node.id.clone(),
+                            text: text.to_owned(),
+                        })
+                    };
+                    let run = node.node.run_streaming(input, &on_text).instrument(span);
+                    let outcome = tokio::time::timeout(budget, run).await;
+                    let node = node.id.clone();
+                    emit(match &outcome {
+                        Ok(Ok(output)) => GraphEvent::NodeFinished {
+                            node,
+                            output: output.text.clone(),
+                        },
+                        Ok(Err(error)) => GraphEvent::NodeFailed {
+                            node,
+                            error: error.to_string(),
+                        },
+                        Err(_elapsed) => GraphEvent::NodeFailed {
+                            node,
+                            error: "did not finish in time".to_owned(),
+                        },
+                    });
+                    (index, outcome)
                 }
             });
             let mut finished = Vec::new();
@@ -479,6 +569,23 @@ impl Node for Graph {
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let run = Graph::run(self, input).await?;
+            Ok(NodeOutput::new(run.answer()).with_usage(run.usage))
+        })
+    }
+
+    /// Streams the text of its nodes.
+    fn run_streaming<'a>(
+        &'a self,
+        input: String,
+        on_text: OnText<'a>,
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+        Box::pin(async move {
+            let emit = |event| {
+                if let GraphEvent::Text { text, .. } = event {
+                    on_text(&text);
+                }
+            };
+            let run = self.run_task(input, Some(&emit)).await?;
             Ok(NodeOutput::new(run.answer()).with_usage(run.usage))
         })
     }

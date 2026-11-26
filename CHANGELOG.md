@@ -12,5 +12,8 @@ First release.
 - `Graph`: agents, swarms, graphs and async functions (`node_fn`) as nodes; edges with
   optional conditions; parallel batches; inputs built from dependencies; bounded
   cycles; failed branches pruned while the rest finish.
+- `Swarm::stream` and `Graph::stream`: turns or nodes starting and finishing, the text
+  agents write as they write it, handoffs, and the outcome last; nested swarms and graphs
+  stream their text; dropping the stream stops the run.
 - Token usage of every model call, stopped turns included; tracing spans per run and
   per turn or node.

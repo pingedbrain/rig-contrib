@@ -100,6 +100,39 @@ the run then returns a `GraphError` with every failure and everything the rest p
 `GraphRun::answer()` is the output of the last node to finish (or of each node in the
 last batch, under its name); `output(id)` reads any node's.
 
+## Streaming
+
+`stream(task)` runs a swarm or graph while reporting what happens, so a UI or CLI shows
+progress instead of waiting a minute for the answer:
+
+```rust
+use futures::StreamExt;
+use rig_multiagent::SwarmEvent;
+
+let mut events = team.stream("What does this project do?");
+while let Some(event) = events.next().await {
+    match event {
+        SwarmEvent::AgentStarted { agent } => println!("\n[{agent}]"),
+        SwarmEvent::Text { text, .. } => print!("{text}"),        // as the model writes it
+        SwarmEvent::Handoff(handoff) => println!("\n-> {}", handoff.to),
+        SwarmEvent::Finished(outcome) => println!("\n{:?}", (*outcome).map(|run| run.answer)),
+        _ => {}
+    }
+}
+```
+
+| `SwarmEvent` | `GraphEvent` |
+|---|---|
+| `AgentStarted { agent }` | `NodeStarted { node }` |
+| `Text { agent, text }` | `Text { node, text }` |
+| `Handoff(Handoff)` | `NodeFinished { node, output }`, `NodeFailed { node, error }` |
+| `Finished(Box<Result<SwarmRun, SwarmError>>)`, last | `Finished(Box<Result<GraphRun, GraphError>>)`, last |
+
+Agents run in Rig's streaming mode, so their text arrives as the model writes it; a
+swarm or graph used as a graph node streams its agents' text under that node. A custom
+`Node` streams by implementing `run_streaming`; by default it reports only its output.
+The run advances only while the stream is polled, and dropping the stream stops it.
+
 ## Tracing
 
 Runs are `swarm.run` / `graph.run` spans, with a `swarm.agent` or `graph.node` span per
@@ -112,12 +145,13 @@ semantics where they overlap: the handoff tool and the context it builds, the li
 the repetition check, batch execution, conditional edges, input from dependencies,
 pruning of failed branches, and nesting. Differences: a handoff ends the agent's turn
 at once; a cyclic graph needs an execution bound; edge conditions are plain closures
-over the run state. Not here (yet): streaming events from a run, interrupts
-(human-in-the-loop) and resuming a run from a snapshot.
+over the run state. Not here (yet): interrupts (human-in-the-loop) and resuming a run
+from a snapshot.
 
 ## Testing
 
 `cargo test` runs swarms and graphs on Rig's scripted mock models and plain functions,
 with no keys or network: handoffs, shared context, refused handoffs, every limit,
 parallel branches (timed), joins, conditional edges, review loops, failures, timeouts,
-nesting and usage accounting.
+nesting and usage accounting; streamed runs on scripted streaming models, with event
+order, nested streaming and cancellation by dropping the stream.

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use futures::future::BoxFuture;
+use futures::stream::BoxStream;
 use rig_agent::Agent;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_agent::completion::PromptError;
@@ -16,7 +17,8 @@ use serde_json::{Value, json};
 use tracing::Instrument;
 
 use crate::BuildError;
-use crate::node::{Meter, Node, NodeError, NodeOutput};
+use crate::events::{Emit, events, stream_agent};
+use crate::node::{Meter, Node, NodeError, NodeOutput, OnText};
 
 /// The name of the tool a swarm gives each of its agents.
 pub const HANDOFF_TOOL: &str = "handoff_to_agent";
@@ -250,6 +252,29 @@ pub enum SwarmFailure {
     },
 }
 
+/// What a [streamed](Swarm::stream) swarm run reports, as it happens.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum SwarmEvent {
+    /// An agent's turn started.
+    AgentStarted {
+        /// The agent.
+        agent: String,
+    },
+    /// Text an agent's model wrote. A turn that ends in a handoff may write
+    /// some before calling the tool; the final answer is the last turn's.
+    Text {
+        /// The agent.
+        agent: String,
+        /// The new text.
+        text: String,
+    },
+    /// An agent passed the work on.
+    Handoff(Handoff),
+    /// The run ended: the last event. Boxed, so the many text events stay small.
+    Finished(Box<Result<SwarmRun, SwarmError>>),
+}
+
 /// What a run has done so far.
 #[derive(Default)]
 struct Trail {
@@ -275,10 +300,54 @@ impl Swarm {
     pub async fn run(&self, task: impl Into<String>) -> Result<SwarmRun, SwarmError> {
         let entry = &self.inner.members[self.inner.entry].name;
         let span = tracing::info_span!("swarm.run", swarm.entry = %entry);
-        self.run_task(task.into()).instrument(span).await
+        self.run_task(task.into(), None).instrument(span).await
     }
 
-    async fn run_task(&self, task: String) -> Result<SwarmRun, SwarmError> {
+    /// Run the swarm on `task`, reporting each turn, the text its model
+    /// writes and each handoff as they happen, and the outcome last.
+    ///
+    /// The run makes progress only while the stream is polled, and stops
+    /// when the stream is dropped.
+    ///
+    /// ```no_run
+    /// # async fn show(swarm: rig_multiagent::Swarm) {
+    /// use futures::StreamExt;
+    /// use rig_multiagent::SwarmEvent;
+    ///
+    /// let mut events = swarm.stream("Fix the flaky test");
+    /// while let Some(event) = events.next().await {
+    ///     match event {
+    ///         SwarmEvent::AgentStarted { agent } => println!("\n[{agent}]"),
+    ///         SwarmEvent::Text { text, .. } => print!("{text}"),
+    ///         SwarmEvent::Handoff(handoff) => println!("\n-> {}", handoff.to),
+    ///         SwarmEvent::Finished(outcome) => println!("\n{outcome:?}"),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    pub fn stream(&self, task: impl Into<String>) -> BoxStream<'_, SwarmEvent> {
+        let task = task.into();
+        let entry = self.inner.members[self.inner.entry].name.clone();
+        events(
+            move |sender| {
+                async move {
+                    let emit = move |event| {
+                        let _ = sender.send(event);
+                    };
+                    self.run_task(task, Some(&emit)).await
+                }
+                .instrument(tracing::info_span!("swarm.run", swarm.entry = %entry))
+            },
+            |outcome| SwarmEvent::Finished(Box::new(outcome)),
+        )
+    }
+
+    async fn run_task(
+        &self,
+        task: String,
+        emit: Option<Emit<'_, SwarmEvent>>,
+    ) -> Result<SwarmRun, SwarmError> {
         let inner = &*self.inner;
         let started = Instant::now();
         let deadline = started + inner.execution_timeout;
@@ -313,14 +382,28 @@ impl Swarm {
                 handoff: Mutex::new(None),
             });
             let meter = Meter::default();
-            let run = member
+            let runner = member
                 .agent
                 .prompt(input)
                 .tool_context(ToolContext::new().with_scope(turn.clone()))
                 .add_hook(meter.clone())
-                .add_hook(StopOnHandoff(turn.clone()))
-                .run()
-                .instrument(tracing::info_span!("swarm.agent", swarm.agent = %member.name));
+                .add_hook(StopOnHandoff(turn.clone()));
+            let run = async {
+                let Some(emit) = emit else {
+                    return runner.run().await;
+                };
+                emit(SwarmEvent::AgentStarted {
+                    agent: member.name.clone(),
+                });
+                let on_text = |text: &str| {
+                    emit(SwarmEvent::Text {
+                        agent: member.name.clone(),
+                        text: text.to_owned(),
+                    })
+                };
+                stream_agent(runner, &on_text).await
+            }
+            .instrument(tracing::info_span!("swarm.agent", swarm.agent = %member.name));
             let outcome = tokio::time::timeout(budget, run).await;
             trail.usage += meter.total();
             let handoff = turn.take();
@@ -344,6 +427,9 @@ impl Swarm {
                         trail.shared.push((handoff.from.clone(), context.clone()));
                     }
                     message = Some(handoff.message.clone());
+                    if let Some(emit) = emit {
+                        emit(SwarmEvent::Handoff(handoff.clone()));
+                    }
                     trail.handoffs.push(handoff);
                 }
                 (Ok(Ok(response)), None) => {
@@ -421,6 +507,23 @@ impl Node for Swarm {
     fn run(&self, input: String) -> BoxFuture<'_, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let run = Swarm::run(self, input).await?;
+            Ok(NodeOutput::new(run.answer).with_usage(run.usage))
+        })
+    }
+
+    /// Streams every agent's text, handing-off turns included.
+    fn run_streaming<'a>(
+        &'a self,
+        input: String,
+        on_text: OnText<'a>,
+    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+        Box::pin(async move {
+            let emit = |event| {
+                if let SwarmEvent::Text { text, .. } = event {
+                    on_text(&text);
+                }
+            };
+            let run = self.run_task(input, Some(&emit)).await?;
             Ok(NodeOutput::new(run.answer).with_usage(run.usage))
         })
     }

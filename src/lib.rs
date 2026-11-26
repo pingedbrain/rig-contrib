@@ -38,13 +38,16 @@
 // of model time; moving that on the error path costs nothing worth boxing for.
 #![allow(clippy::result_large_err)]
 
+mod events;
 mod graph;
 mod node;
 mod swarm;
 
-pub use graph::{Graph, GraphBuilder, GraphError, GraphFailure, GraphRun, GraphState};
-pub use node::{FnNode, Node, NodeError, NodeOutput, node_fn};
-pub use swarm::{HANDOFF_TOOL, Handoff, Swarm, SwarmBuilder, SwarmError, SwarmFailure, SwarmRun};
+pub use graph::{Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState};
+pub use node::{FnNode, Node, NodeError, NodeOutput, OnText, node_fn};
+pub use swarm::{
+    HANDOFF_TOOL, Handoff, Swarm, SwarmBuilder, SwarmError, SwarmEvent, SwarmFailure, SwarmRun,
+};
 
 /// Why a [`Swarm`] or [`Graph`] could not be built.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
