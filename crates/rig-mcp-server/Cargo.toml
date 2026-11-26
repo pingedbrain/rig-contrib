@@ -7,7 +7,7 @@ license.workspace = true
 readme = "README.md"
 description = "Serve Rig agents and tools over the Model Context Protocol (MCP): agents as tools with sessions, streamed progress and cancellation; typed agents with structured output; stdio and Streamable HTTP."
 repository.workspace = true
-keywords = ["rig", "mcp", "agents", "llm", "model-context-protocol"]
+keywords = ["rig", "mcp", "agents", "llm", "tools"]
 categories = ["network-programming", "web-programming::http-server"]
 
 [features]
