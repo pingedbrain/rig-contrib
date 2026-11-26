@@ -15,8 +15,18 @@ categories = ["development-tools::debugging"]
 # context across processes (rig-a2a, rig-mcp-server) leave it out.
 default = ["otlp"]
 otlp = ["dep:opentelemetry-otlp"]
+# Export to Amazon CloudWatch's OTLP endpoints, signed with SigV4 from the
+# standard AWS credential chain (an IAM role on AgentCore, ECS, EC2, Lambda).
+aws = ["otlp", "dep:aws-config", "dep:aws-sigv4", "dep:aws-credential-types", "dep:async-trait", "dep:bytes", "dep:reqwest", "dep:tokio"]
 
 [dependencies]
+async-trait = { version = "0.1", optional = true }
+aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process", "sso"], optional = true }
+aws-credential-types = { version = "1", optional = true }
+aws-sigv4 = { version = "1", optional = true }
+bytes = { version = "1", optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["rustls"], optional = true }
+tokio = { version = "1.54.1", features = ["rt"], optional = true }
 http = "1"
 opentelemetry = "0.32"
 opentelemetry-http = "0.32"

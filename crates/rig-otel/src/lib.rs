@@ -42,6 +42,8 @@
     )
 )]
 
+#[cfg(feature = "aws")]
+mod aws;
 mod metrics;
 mod propagation;
 mod session;
@@ -58,6 +60,8 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer, Registry};
 
+#[cfg(feature = "aws")]
+pub use aws::AwsError;
 pub use propagation::{extract, inject};
 pub use session::{SESSION_ID, set_session};
 
@@ -82,6 +86,10 @@ pub enum InitError {
     #[cfg(not(feature = "otlp"))]
     #[error("no exporter: enable the `otlp` feature or set span and metric exporters")]
     NoExporter,
+    /// Export to Amazon CloudWatch could not be set up.
+    #[cfg(feature = "aws")]
+    #[error(transparent)]
+    Aws(#[from] AwsError),
     /// Another global `tracing` subscriber was already set.
     #[error("a global tracing subscriber is already set: {0}")]
     Subscriber(#[source] tracing_subscriber::util::TryInitError),
