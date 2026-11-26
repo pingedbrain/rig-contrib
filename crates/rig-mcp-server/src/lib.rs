@@ -21,6 +21,16 @@
 //! ```
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::unreachable
+    )
+)]
 
 mod content;
 mod history;
@@ -28,7 +38,7 @@ mod server;
 mod transport;
 
 pub use history::{DEFAULT_HISTORY_TOKENS, DEFAULT_MAX_CONTEXTS};
-pub use server::{DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_MAX_RUN_DURATION, McpServer};
+pub use server::{BuildError, DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_MAX_RUN_DURATION, McpServer};
 pub use transport::{MCP_PATH, ServeError};
 
 /// The Axum version [`McpServer::into_router`] builds with, for `axum::serve`.

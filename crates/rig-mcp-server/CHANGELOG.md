@@ -15,4 +15,6 @@ First release.
 - Rig tool annotations carried over (readOnlyHint, destructiveHint, ...).
 - stdio, Streamable HTTP (bearer token, allowed hosts) and any rmcp transport.
 - Limits on concurrent calls and run duration; `mcp.agent_call` tracing spans.
+- Two tools with one name are refused with `BuildError::DuplicateTool` when the
+  server is served or turned into a router.
 - Keyless interop suite against the official MCP Python SDK, in CI.

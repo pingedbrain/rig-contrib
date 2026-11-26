@@ -44,8 +44,8 @@ impl Tool for Add {
 
     async fn call(&self, _: &mut ToolContext, args: Value) -> Result<Value, Self::Error> {
         let n = |key: &str| {
-            args[key]
-                .as_f64()
+            args.get(key)
+                .and_then(Value::as_f64)
                 .ok_or_else(|| ToolExecutionError::other("not a number"))
         };
         Ok(json!({"sum": n("a")? + n("b")?}))
@@ -76,6 +76,6 @@ async fn main() -> Result<(), rig_mcp_server::ServeError> {
     let port: u16 = std::env::var("PORT").map_or(Ok(3400), |port| port.parse())?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     eprintln!("echo MCP server at http://127.0.0.1:{port}/mcp");
-    rig_mcp_server::axum::serve(listener, server.into_router()).await?;
+    rig_mcp_server::axum::serve(listener, server.into_router()?).await?;
     Ok(())
 }

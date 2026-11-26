@@ -39,7 +39,7 @@ stops.
 server.serve_stdio().await?;
 
 // Streamable HTTP at /mcp, as an Axum router.
-let app = server.bearer_token(token).into_router();
+let app = server.bearer_token(token).into_router()?;
 axum::serve(listener, app).await?;
 
 // Any rmcp transport (an in-memory duplex in tests, a socket...).

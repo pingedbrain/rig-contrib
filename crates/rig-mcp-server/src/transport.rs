@@ -11,7 +11,7 @@ use rmcp::transport::streamable_http_server::session::local::LocalSessionManager
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use crate::McpServer;
-use crate::server::Handler;
+use crate::server::{BuildError, Handler};
 
 /// Where the Streamable HTTP endpoint is mounted by [`McpServer::into_router`].
 pub const MCP_PATH: &str = "/mcp";
@@ -41,26 +41,38 @@ impl McpServer {
     /// Serve over stdin and stdout until the client disconnects: what a
     /// local MCP client (Claude Code, Cursor, Zed) expects of a server it
     /// launches. Stdout carries the protocol, so log to stderr only.
+    ///
+    /// # Errors
+    ///
+    /// A [`BuildError`] when two tools share a name, or the transport's error.
     pub async fn serve_stdio(self) -> Result<(), ServeError> {
-        let running = Handler::new(self).serve(rmcp::transport::stdio()).await?;
+        let running = Handler::new(self)?.serve(rmcp::transport::stdio()).await?;
         running.waiting().await?;
         Ok(())
     }
 
     /// Serve over any MCP transport (an in-memory duplex, a socket, a custom
     /// one) until the client disconnects.
+    ///
+    /// # Errors
+    ///
+    /// A [`BuildError`] when two tools share a name, or the transport's error.
     pub async fn serve<T, E, A>(self, transport: T) -> Result<(), ServeError>
     where
         T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
         E: std::error::Error + Send + Sync + 'static,
     {
-        let running = Handler::new(self).serve(transport).await?;
+        let running = Handler::new(self)?.serve(transport).await?;
         running.waiting().await?;
         Ok(())
     }
 
     /// The Streamable HTTP endpoint at [`MCP_PATH`], as an Axum router.
-    pub fn into_router(self) -> axum::Router {
+    ///
+    /// # Errors
+    ///
+    /// [`BuildError::DuplicateTool`] when two tools share a name.
+    pub fn into_router(self) -> Result<axum::Router, BuildError> {
         let expected: Option<Arc<str>> = self
             .bearer
             .as_ref()
@@ -69,15 +81,15 @@ impl McpServer {
         if let Some(hosts) = self.allowed_hosts.clone() {
             config = config.with_allowed_hosts(hosts);
         }
-        let handler = Handler::new(self);
+        let handler = Handler::new(self)?;
         let service = StreamableHttpService::new(
             move || Ok(handler.clone()),
             Arc::new(LocalSessionManager::default()),
             config,
         );
-        axum::Router::new()
+        Ok(axum::Router::new()
             .nest_service(MCP_PATH, service)
-            .layer(axum::middleware::from_fn_with_state(expected, guard))
+            .layer(axum::middleware::from_fn_with_state(expected, guard)))
     }
 }
 

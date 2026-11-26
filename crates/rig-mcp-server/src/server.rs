@@ -122,9 +122,8 @@ impl McpServer {
     /// plus `{answer, session_id}` as structured content; passing that
     /// `session_id` back continues the conversation.
     ///
-    /// # Panics
-    ///
-    /// If another tool already has that name.
+    /// Another tool with the same name makes serving fail with
+    /// [`BuildError::DuplicateTool`].
     #[must_use]
     pub fn agent(self, agent: Agent) -> Self {
         let (name, description) = agent_identity(&agent);
@@ -149,9 +148,8 @@ impl McpServer {
     /// and the `T` comes back as structured content matching the tool's
     /// output schema, the schema of `T`.
     ///
-    /// # Panics
-    ///
-    /// If another tool already has the agent's name.
+    /// Another tool with the agent's name makes serving fail with
+    /// [`BuildError::DuplicateTool`].
     #[must_use]
     pub fn typed_agent<T>(self, agent: Agent) -> Self
     where
@@ -195,9 +193,8 @@ impl McpServer {
     /// Expose a Rig tool as itself: same name, description, parameters and
     /// annotations; called directly, with no model involved.
     ///
-    /// # Panics
-    ///
-    /// If another tool already has that name.
+    /// Another tool with the same name makes serving fail with
+    /// [`BuildError::DuplicateTool`].
     #[must_use]
     pub fn tool<T: Tool + 'static>(self, tool: T) -> Self {
         let definition = tool_definition(&tool);
@@ -211,9 +208,8 @@ impl McpServer {
 
     /// Expose a [`DynamicTool`] as itself; see [`tool`](Self::tool).
     ///
-    /// # Panics
-    ///
-    /// If another tool already has that name.
+    /// Another tool with the same name makes serving fail with
+    /// [`BuildError::DuplicateTool`].
     #[must_use]
     pub fn dynamic_tool(self, tool: DynamicTool) -> Self {
         let definition = tool.definition();
@@ -291,16 +287,19 @@ impl McpServer {
     }
 
     fn add(mut self, entry: Entry) -> Self {
-        assert!(
-            self.tools
-                .iter()
-                .all(|known| known.tool.name != entry.tool.name),
-            "rig-mcp-server: two tools are named `{}`",
-            entry.tool.name
-        );
         self.tools.push(entry);
         self
     }
+}
+
+/// Why an [`McpServer`] could not be served.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum BuildError {
+    /// Two tools (agents, typed agents or plain tools) have the same name, so
+    /// a client could not tell which one it calls.
+    #[error("two tools are named `{0}`")]
+    DuplicateTool(String),
 }
 
 /// The server as an MCP handler, shared by every connection.
@@ -313,21 +312,22 @@ struct Inner {
 }
 
 impl Handler {
-    pub(crate) fn new(server: McpServer) -> Self {
-        let by_name = server
-            .tools
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| (entry.tool.name.to_string(), index))
-            .collect();
-        Self(Arc::new(Inner { server, by_name }))
+    /// The handler of `server`, refused when two of its tools share a name.
+    pub(crate) fn new(server: McpServer) -> Result<Self, BuildError> {
+        let mut by_name = HashMap::with_capacity(server.tools.len());
+        for (index, entry) in server.tools.iter().enumerate() {
+            let name = entry.tool.name.to_string();
+            if by_name.contains_key(&name) {
+                return Err(BuildError::DuplicateTool(name));
+            }
+            by_name.insert(name, index);
+        }
+        Ok(Self(Arc::new(Inner { server, by_name })))
     }
 
     fn entry(&self, name: &str) -> Option<&Entry> {
-        self.0
-            .by_name
-            .get(name)
-            .map(|&index| &self.0.server.tools[index])
+        let index = *self.0.by_name.get(name)?;
+        self.0.server.tools.get(index)
     }
 }
 
@@ -554,11 +554,15 @@ fn error(text: &str) -> CallToolResult {
     CallToolResult::error(vec![ContentBlock::text(text)])
 }
 
+/// `value` as a JSON Schema object; an empty schema, or one that is not an
+/// object, becomes the schema of an object with no properties.
 fn object(value: Value) -> JsonObject {
     match value {
         Value::Object(map) if !map.is_empty() => map,
-        _ => serde_json::from_value(json!({"type": "object", "properties": {}}))
-            .expect("a literal object"),
+        _ => JsonObject::from_iter([
+            ("type".to_owned(), json!("object")),
+            ("properties".to_owned(), json!({})),
+        ]),
     }
 }
 
@@ -614,36 +618,4 @@ pub(crate) fn tool_name(name: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use rig_agent::completion::PromptError;
-    use rig_core::error::{ErrorKind, ErrorReport};
-
-    use super::{failure_message, tool_name};
-
-    #[test]
-    fn streamed_failures_are_classified_by_status_and_retryability() {
-        let report = |status: Option<u16>, retryable: bool| {
-            let mut report = ErrorReport::new(ErrorKind::ProviderResponse, "upstream said no")
-                .with_retryable(retryable);
-            if let Some(status) = status {
-                report = report.with_http_status(status);
-            }
-            PromptError::Report(report)
-        };
-        assert!(failure_message(&report(Some(429), true)).contains("rate limiting"));
-        assert!(failure_message(&report(Some(401), false)).contains("credentials"));
-        assert!(failure_message(&report(Some(503), true)).contains("unavailable"));
-        assert!(failure_message(&report(None, true)).contains("could not be reached"));
-        assert_eq!(
-            failure_message(&report(None, false)),
-            "The agent run failed."
-        );
-    }
-
-    #[test]
-    fn agent_names_become_provider_safe_tool_names() {
-        assert_eq!(tool_name("rig-lab assistant"), "rig_lab_assistant");
-        assert_eq!(tool_name("  "), "agent");
-        assert_eq!(tool_name(&"x".repeat(80)).len(), 64);
-    }
-}
+mod tests;

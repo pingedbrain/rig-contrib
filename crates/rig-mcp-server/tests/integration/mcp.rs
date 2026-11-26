@@ -1,6 +1,6 @@
 //! Rig agents and tools served over MCP, driven by the official MCP client.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context, ensure};
 use rig_agent::{Agent, AgentBuilder};
@@ -40,8 +40,8 @@ impl Tool for Add {
 
     async fn call(&self, _: &mut ToolContext, args: Value) -> Result<Value, Self::Error> {
         let n = |key: &str| {
-            args[key]
-                .as_f64()
+            args.get(key)
+                .and_then(Value::as_f64)
                 .ok_or_else(|| ToolExecutionError::other("not a number"))
         };
         Ok(json!({"sum": n("a")? + n("b")?}))
@@ -82,7 +82,10 @@ impl ClientHandler for Client {
         _: NotificationContext<RoleClient>,
     ) {
         if let Some(message) = params.message {
-            self.progress.lock().unwrap().push(message);
+            self.progress
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(message);
         }
     }
 }
@@ -119,18 +122,24 @@ async fn tools_are_listed_with_their_schemas_and_annotations() -> anyhow::Result
         "{names:?}"
     );
 
-    let helper = &tools[0];
-    ensure!(helper.input_schema["required"] == json!(["message"]));
+    let [helper, extractor, add] = tools.as_slice() else {
+        anyhow::bail!("three tools: {names:?}");
+    };
+    ensure!(helper.input_schema.get("required") == Some(&json!(["message"])));
+    let output = serde_json::to_value(&helper.output_schema)?;
     ensure!(
-        helper.output_schema.as_ref().context("output schema")?["properties"]["session_id"]
-            .is_object()
+        output
+            .pointer("/properties/session_id")
+            .is_some_and(Value::is_object),
+        "{output}"
     );
-    let extractor = &tools[1];
+    let output = serde_json::to_value(&extractor.output_schema)?;
     ensure!(
-        extractor.output_schema.as_ref().context("schema of T")?["properties"]["priority"]
-            .is_object()
+        output
+            .pointer("/properties/priority")
+            .is_some_and(Value::is_object),
+        "schema of T: {output}"
     );
-    let add = &tools[2];
     ensure!(
         add.annotations.as_ref().and_then(|a| a.read_only_hint) == Some(true),
         "{add:?}"
@@ -177,14 +186,22 @@ async fn an_agent_answers_keeps_its_session_and_streams_progress() -> anyhow::Re
     let first: rmcp::model::CallToolResult =
         serde_json::from_value(serde_json::to_value(response)?)?;
     let structured = first.structured_content.context("structured content")?;
-    ensure!(structured["answer"] == "I am Rig.", "{structured}");
-    let session = structured["session_id"]
-        .as_str()
+    ensure!(
+        structured.get("answer") == Some(&json!("I am Rig.")),
+        "{structured}"
+    );
+    let session = structured
+        .get("session_id")
+        .and_then(Value::as_str)
         .context("a session id")?
         .to_owned();
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     ensure!(
-        *handler.progress.lock().unwrap() == ["I am ", "Rig."],
+        *handler
+            .progress
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            == ["I am ", "Rig."],
         "{:?}",
         handler.progress
     );
@@ -196,8 +213,11 @@ async fn an_agent_answers_keeps_its_session_and_streams_progress() -> anyhow::Re
             json!({"message": "What did I ask?", "session_id": session}),
         ))
         .await?;
-    ensure!(second.structured_content.context("structured")?["session_id"] == session.as_str());
-    let seen = format!("{:?}", model.requests()[1].chat_history);
+    let structured = second.structured_content.context("structured")?;
+    ensure!(structured.get("session_id") == Some(&json!(session)));
+    let requests = model.requests();
+    let request = requests.get(1).context("a second request")?;
+    let seen = format!("{:?}", request.chat_history);
     ensure!(
         seen.contains("Who are you?") && seen.contains("I am Rig."),
         "{seen}"
@@ -249,7 +269,7 @@ async fn http_needs_the_bearer_token() -> anyhow::Result<()> {
     let app = McpServer::new("test")
         .tool(Add)
         .bearer_token("s3cret")
-        .into_router();
+        .into_router()?;
     tokio::spawn(async move { rig_mcp_server::axum::serve(listener, app).await });
 
     let anonymous = reqwest::Client::new()
