@@ -221,6 +221,15 @@ run id is 1-128 of `[A-Za-z0-9_-]`; a run is one JSON file,
 `rig-multiagent/{swarm,graph}/<run_id>.json`, plus one per journal and nested run,
 each written atomically.
 
+## Prompt caching
+
+Each conversation of a run, a swarm agent's turn or an agent node's run, sends one
+prompt-cache key (`GenerationOptions::cache_key`) with all its model calls, so gateways
+that route by it (OpenCode Go, OpenAI's prompt cache) keep its calls together and reuse
+their cached prefix; without one, Rig sends a fresh id with every call. A checkpointed
+run's keys are stable, so a resumed turn or node continues its cache. An agent that sets
+its own key keeps it.
+
 ## Tracing
 
 Runs are `swarm.run` / `graph.run` spans, with a `swarm.agent` or `graph.node` span per

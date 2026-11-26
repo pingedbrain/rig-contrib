@@ -25,5 +25,7 @@ First release.
   run again; nested swarms and graphs resume inside their node.
 - `Node::run(input, io)` with `NodeIo` (text, questions, saving) replaces the separate
   streaming method.
+- One prompt-cache key per conversation (swarm turn, agent node), stable across
+  resumes, unless the agent sets its own.
 - Token usage of every model call, stopped turns included; tracing spans per run and
   per turn or node.

@@ -21,7 +21,7 @@ use crate::BuildError;
 use crate::checkpoint::{Checkpoints, Journal, Saving};
 use crate::events::{Emit, events, stream_agent};
 use crate::human::{Clock, Question, answer};
-use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput};
+use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput, in_conversation};
 
 /// The name of the tool a swarm gives each of its agents.
 pub const HANDOFF_TOOL: &str = "handoff_to_agent";
@@ -597,15 +597,18 @@ impl Swarm {
                 questions: Mutex::new(None),
             });
             let meter = Meter::default();
-            let mut runner = member
-                .agent
-                .prompt(input)
+            // Each turn is a conversation of its own: one cache key for it,
+            // the same when a resumed run repeats the turn.
+            let part = saving
+                .as_ref()
+                .map(|saving| saving.part("journal", "turn", trail.agents.len()));
+            let key = part.as_ref().map(|part| part.run_id.clone());
+            let mut runner = in_conversation(member.agent.prompt(input), &member.agent, key)
                 .tool_context(ToolContext::new().with_scope(turn.clone()))
                 .add_hook(meter.clone());
-            if let Some(saving) = &saving {
+            if let Some(journal) = part {
                 // A resumed turn replays the tools it ran before, answers to
                 // ask_human included, rather than running them again.
-                let journal = saving.part("journal", "turn", trail.agents.len());
                 match Journal::open(journal).await {
                     Ok(journal) => runner = runner.add_hook(journal),
                     Err(error) => return Err(trail.fail(SwarmFailure::Checkpoint { error })),

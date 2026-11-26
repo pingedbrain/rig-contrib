@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use futures::future::BoxFuture;
 use rig_agent::Agent;
+use rig_agent::AgentRunner;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
+use rig_core::completion::GenerationOptions;
 use rig_core::completion::Usage;
 
 use crate::checkpoint::{Journal, Saving};
@@ -154,7 +156,9 @@ impl Node for Agent {
     ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let meter = Meter::default();
-            let mut runner = self.prompt(input).add_hook(meter.clone());
+            let key = io.saving().map(|saving| saving.run_id.clone());
+            let mut runner = in_conversation(self.prompt(input), self, key);
+            runner = runner.add_hook(meter.clone());
             if let Some(saving) = io.saving() {
                 runner = runner.add_hook(Journal::open(saving.kind("journal")).await?);
             }
@@ -199,6 +203,32 @@ where
         let future = (self.0)(input);
         Box::pin(async move { Ok(NodeOutput::new(future.await?)) })
     }
+}
+
+/// Give one agent run its own prompt-cache key, `key` or a fresh one, unless
+/// the agent sets its own. Gateways such as OpenCode Go route a
+/// conversation's calls by it and reuse their prompt cache; without one Rig
+/// sends a fresh id with every call, so no call of a run reuses another's.
+pub(crate) fn in_conversation(
+    runner: AgentRunner,
+    agent: &Agent,
+    key: Option<String>,
+) -> AgentRunner {
+    if agent.run_spec().options.cache_key.is_some() {
+        return runner;
+    }
+    let key = key.unwrap_or_else(fresh_key);
+    runner.options(GenerationOptions::default().cache_key(key))
+}
+
+/// A key no other run of any process shares.
+fn fresh_key() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let run = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("rig-multiagent-{}-{started:x}-{run}", std::process::id())
 }
 
 /// Adds up the usage of every completion an agent run makes, including the
