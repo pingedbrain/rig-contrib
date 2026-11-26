@@ -1,0 +1,40 @@
+[package]
+name = "rig-evals"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "Evaluations for Rig agents: datasets of cases, built-in and LLM-judge evaluators, repetitions and pass-rate thresholds, JSON, JUnit and Markdown reports, OpenTelemetry GenAI evaluation events."
+keywords = ["rig", "evaluation", "agents", "llm", "testing"]
+categories = ["development-tools::testing"]
+
+[features]
+# Target for rig-multiagent nodes (swarms, graphs).
+multiagent = ["dep:rig-multiagent"]
+
+[dependencies]
+futures = "0.3"
+regex = "1"
+rig-agent = { version = "0.47", default-features = false }
+rig-core = { version = "0.47", default-features = false }
+rig-multiagent = { version = "0.47.0", path = "../rig-multiagent", optional = true }
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
+rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false }
+tempfile = "3"
+xmlparser = "0.13"
+tokio = { version = "1.54.1", features = ["full"] }
+
+[lints]
+workspace = true
