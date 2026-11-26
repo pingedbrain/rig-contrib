@@ -104,14 +104,18 @@ fn progress_in_status_messages_streams_then_the_artifact_settles_it() {
 #[tokio::test]
 async fn a_stream_that_stops_unanswered_is_an_error() {
     let unanswered = futures::stream::iter([Ok(status(TaskState::Working))]).boxed();
-    let events: Vec<_> = follow(unanswered, Duration::from_secs(1)).collect().await;
+    let events: Vec<_> = follow(unanswered, Duration::from_secs(1), tracing::Span::none())
+        .collect()
+        .await;
     assert!(
         matches!(events.last(), Some(Err(RemoteError::A2a(_)))),
         "{events:?}"
     );
 
     let empty = futures::stream::empty().boxed();
-    let events: Vec<_> = follow(empty, Duration::from_secs(1)).collect().await;
+    let events: Vec<_> = follow(empty, Duration::from_secs(1), tracing::Span::none())
+        .collect()
+        .await;
     assert!(
         matches!(events.as_slice(), [Err(RemoteError::A2a(_))]),
         "{events:?}"

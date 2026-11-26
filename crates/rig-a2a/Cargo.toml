@@ -11,6 +11,11 @@ categories = ["network-programming", "web-programming::http-server"]
 # Not on crates.io until the Rig maintainers weigh in on the name (0xPlaygrounds/rig#391).
 description = "Serve Rig agents over the Agent2Agent (A2A) protocol and call remote A2A agents as Rig tools, built on the official A2A Rust SDK."
 
+[features]
+# W3C trace context and sessions across agents: a call to a remote agent and
+# the task it starts make one OpenTelemetry trace.
+otel = ["dep:rig-otel", "dep:async-trait"]
+
 # A2A serving is native-only: the SDK's server runs on tokio and axum.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 rig-agent = { version = "0.47", default-features = false }
@@ -32,11 +37,14 @@ futures = "0.3"
 thiserror = "2"
 tracing = "0.1"
 tower-http = { version = "0.6", features = ["limit"] }
+rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false, optional = true }
+async-trait = { version = "0.1", optional = true }
 
 [dev-dependencies]
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
 rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
 anyhow = "1"
+opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

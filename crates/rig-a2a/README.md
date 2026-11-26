@@ -122,7 +122,27 @@ RemoteAgent::builder(url).bearer_token(token).timeout(Duration::from_secs(60)).c
 Each task runs in an `a2a.task` span (`a2a.task_id`, `a2a.context_id`, and `a2a.state`
 recorded when it ends: `completed`, `failed`, `failed_timeout`, `rejected`,
 `rejected_busy`). Rig's own spans for the model calls and tools nest under it, so an
-OpenTelemetry backend shows each A2A task with everything it spent.
+OpenTelemetry backend shows each A2A task with everything it spent. Each `RemoteAgent`
+call runs in an `a2a.call` span (`a2a.agent`).
+
+### Tracing across agents
+
+With the `otel` feature, a Rig agent calling a remote Rig agent makes **one trace**
+across both processes, via `rig-otel`:
+
+- every call (v1.0 and v0.3) carries the W3C `traceparent` and `baggage` of its
+  `a2a.call` span;
+- the server's `a2a.task` span continues that trace and starts a session: its
+  `session.id`, on it and every span under it, is the
+  `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header when AWS Bedrock AgentCore
+  Runtime sends one, else the task's A2A `contextId`.
+
+```toml
+rig-a2a = { version = "0.47", features = ["otel"] }
+```
+
+Install an OpenTelemetry subscriber on both sides (`rig_otel::init()`); without the
+feature nothing changes and no OpenTelemetry crates are pulled in.
 
 ## Not supported
 

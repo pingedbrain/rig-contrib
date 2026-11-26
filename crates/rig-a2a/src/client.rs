@@ -196,6 +196,7 @@ impl RemoteAgent {
                 }
             })
         };
+        let answer = tracing::Instrument::instrument(answer, self.call_span());
         let response = tokio::time::timeout(self.timeout, answer)
             .await
             .map_err(|_| RemoteError::Timeout(self.timeout))??;
@@ -233,10 +234,18 @@ impl RemoteAgent {
             })
         };
         let timeout = self.timeout;
+        let span = self.call_span();
+        let open = tracing::Instrument::instrument(open, span.clone());
         let events = tokio::time::timeout(timeout, open)
             .await
             .map_err(|_| RemoteError::Timeout(timeout))??;
-        Ok(Box::pin(follow(events, timeout)))
+        Ok(Box::pin(follow(events, timeout, span)))
+    }
+
+    /// The span one call runs in, from the request until the answer is
+    /// whole. With the `otel` feature, the call carries its trace context.
+    fn call_span(&self) -> tracing::Span {
+        tracing::info_span!("a2a.call", otel.kind = "client", a2a.agent = %self.card.name)
     }
 
     /// This agent as a tool named after its card, taking a `message` and an
@@ -331,6 +340,10 @@ impl RemoteAgentBuilder {
             if let Some(token) = &self.bearer {
                 factory = factory.with_interceptor(Arc::new(AuthInterceptor::bearer(token)));
             }
+            #[cfg(feature = "otel")]
+            {
+                factory = factory.with_interceptor(Arc::new(crate::otel::TraceContext));
+            }
             let client = factory.build().create_from_card(&card).await?;
             return Ok(RemoteAgent {
                 card,
@@ -356,12 +369,15 @@ impl RemoteAgentBuilder {
     }
 }
 
-/// Assemble `events` into reply events, giving up when one takes longer than `timeout`.
+/// Assemble `events` into reply events, giving up when one takes longer than
+/// `timeout`. The call's `span` lasts as long as the stream.
 fn follow(
     mut events: BoxStream<'static, Result<StreamResponse, RemoteError>>,
     timeout: Duration,
+    span: tracing::Span,
 ) -> impl Stream<Item = Result<ReplyEvent, RemoteError>> + Send + 'static {
     async_stream::try_stream! {
+        let _span = span;
         let mut assembly = Assembly::default();
         loop {
             let next = tokio::time::timeout(timeout, events.next())

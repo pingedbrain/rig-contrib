@@ -483,6 +483,12 @@ async fn call(
     if let Some(token) = bearer {
         request = request.bearer_auth(token);
     }
+    #[cfg(feature = "otel")]
+    {
+        let mut headers = HeaderMap::new();
+        rig_otel::inject(&mut headers);
+        request = request.headers(headers);
+    }
     Ok(request.send().await?.error_for_status()?)
 }
 

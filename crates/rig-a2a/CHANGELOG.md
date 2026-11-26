@@ -18,6 +18,8 @@ First release.
 - `RemoteAgent`: call any A2A agent, v1.0 or v0.3, streaming with an idle timeout;
   replies keep text, data and files; as a Rig tool, the model gets a JSON summary
   plus any image.
-- `a2a.task` tracing spans parenting Rig's own spans.
+- `a2a.task` tracing spans parenting Rig's own spans; `a2a.call` spans around calls.
+- Feature `otel`: calls carry W3C trace context and the remote task continues the
+  trace, with `session.id` from AgentCore's session header or the A2A context.
 - Keyless interop suite against Strands Agents 1.66 (both streaming modes) and the
   official A2A Python SDK 1.x, in CI.

@@ -52,6 +52,8 @@ mod client;
 mod executor;
 #[cfg(not(target_family = "wasm"))]
 mod history;
+#[cfg(all(feature = "otel", not(target_family = "wasm")))]
+mod otel;
 #[cfg(not(target_family = "wasm"))]
 mod parts;
 #[cfg(not(target_family = "wasm"))]

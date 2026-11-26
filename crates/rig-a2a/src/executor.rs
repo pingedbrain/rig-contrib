@@ -236,10 +236,13 @@ fn run(
         // under it, and it records how the task ended.
         let span = tracing::info_span!(
             "a2a.task",
+            otel.kind = "server",
             a2a.task_id = %ids.task,
             a2a.context_id = %ids.context,
             a2a.state = tracing::field::Empty,
         );
+        #[cfg(feature = "otel")]
+        crate::otel::continue_trace(&span, &ctx.service_params, &ids.context);
         let end = |state: &'static str| {
             span.record("a2a.state", state);
         };
