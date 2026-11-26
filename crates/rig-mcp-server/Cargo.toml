@@ -1,13 +1,13 @@
 [package]
 name = "rig-mcp-server"
-version = "0.47.0"
+version.workspace = true
 publish = false
-edition = "2024"
-rust-version = "1.97.1"
-license = "MIT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 readme = "README.md"
 description = "Serve Rig agents and tools over the Model Context Protocol (MCP): agents as tools with sessions, streamed progress and cancellation; typed agents with structured output; stdio and Streamable HTTP."
-repository = "https://github.com/pingedbrain/rig-mcp-server"
+repository.workspace = true
 keywords = ["rig", "mcp", "agents", "llm", "model-context-protocol"]
 categories = ["network-programming", "web-programming::http-server"]
 
@@ -37,3 +37,6 @@ rig-rmcp = "0.47"
 rmcp = { version = "3.11", features = ["client", "transport-streamable-http-client-reqwest"] }
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 http = "1"
+
+[lints]
+workspace = true

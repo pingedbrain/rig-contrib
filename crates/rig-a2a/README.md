@@ -135,7 +135,7 @@ files produced by tools (only the model's own images become file parts).
 | Example | What |
 |---|---|
 | `cargo run --example serve` | An OpenAI-backed agent served over A2A (`OPENAI_API_KEY`) |
-| `cargo run --example echo_server` | A keyless, deterministic agent answering `pong` (for tests) |
+| `cargo run --example a2a_echo_server` | A keyless, deterministic agent answering `pong` (for tests) |
 | `cargo run --example call -- <url> <text>` | Call any A2A agent, v1.0 or v0.3, streaming the answer |
 
 ## Testing and CI

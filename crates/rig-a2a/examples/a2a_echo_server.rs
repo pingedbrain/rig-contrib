@@ -4,7 +4,7 @@
 //! Rig agent served with `A2aServer` (v1.0 at the root, v0.3 under `/v03`).
 //!
 //! ```sh
-//! PORT=3000 A2A_TOKEN=secret cargo run --example echo_server
+//! PORT=3000 A2A_TOKEN=secret cargo run --example a2a_echo_server
 //! ```
 //!
 //! `PORT` defaults to 3000; with `A2A_TOKEN` set, calls need that bearer token.

@@ -84,7 +84,7 @@ served tools through `rig-rmcp` (Rig to MCP to Rig).
 
 `interop/run.sh` checks the server against an independent implementation, the official
 MCP Python SDK, over stdio and Streamable HTTP, keyless (`cargo run --example
-echo_server`). CI runs both, plus MSRV and `cargo-deny`.
+mcp_echo_server`). CI runs both, plus MSRV and `cargo-deny`.
 
 ## Not supported
 

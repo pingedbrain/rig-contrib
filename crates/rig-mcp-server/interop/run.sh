@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=target/debug/examples/echo_server
+BIN=${CARGO_TARGET_DIR:-../../target}/debug/examples/mcp_echo_server
 MCP_PY=${MCP_PY:-python3}
 TOKEN=interop-token
 URL=http://127.0.0.1:3400/mcp

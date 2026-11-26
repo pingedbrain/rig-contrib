@@ -1,13 +1,13 @@
 [package]
 name = "rig-multiagent"
-version = "0.47.0"
+version.workspace = true
 publish = false
-edition = "2024"
-rust-version = "1.97.1"
-license = "MIT"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 readme = "README.md"
 description = "Multi-agent patterns for Rig: a Swarm of agents that hand work to each other, and a Graph of agents and functions with conditional edges and parallel branches."
-repository = "https://github.com/pingedbrain/rig-multiagent"
+repository.workspace = true
 keywords = ["rig", "agents", "multi-agent", "swarm", "llm"]
 categories = ["asynchronous"]
 
@@ -29,3 +29,6 @@ rig-core = { version = "0.47", default-features = false, features = ["test-utils
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
 rig-memory = { version = "0.47", default-features = false, features = ["fs"] }
 tempfile = "3"
+
+[lints]
+workspace = true

@@ -4,8 +4,8 @@
 //! read-only `add` tool, over stdio or Streamable HTTP:
 //!
 //! ```sh
-//! cargo run --example echo_server              # stdio
-//! PORT=3400 MCP_TOKEN=secret cargo run --example echo_server -- http
+//! cargo run --example mcp_echo_server              # stdio
+//! PORT=3400 MCP_TOKEN=secret cargo run --example mcp_echo_server -- http
 //! ```
 
 use rig_agent::AgentBuilder;

@@ -1,6 +1,6 @@
 """The official MCP Python SDK checking a rig-mcp-server, keyless.
 
-    python mcp_client.py stdio <path/to/echo_server>
+    python mcp_client.py stdio <path/to/mcp_echo_server>
     python mcp_client.py http <url> [token]
 
 Exits non-zero on the first check that fails. An independent implementation

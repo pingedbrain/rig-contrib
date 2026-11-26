@@ -11,7 +11,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=target/debug/examples
+BIN=${CARGO_TARGET_DIR:-../../target}/debug/examples
 STRANDS_PY=${STRANDS_PY:-python3}
 A2A_V1_PY=${A2A_V1_PY:-python3}
 TOKEN=interop-token
@@ -20,7 +20,7 @@ STRANDS=http://127.0.0.1:9300
 STRANDS_COMPLIANT=http://127.0.0.1:9301
 
 trap 'kill $(jobs -p) 2>/dev/null || true' EXIT
-PORT=3300 A2A_TOKEN=$TOKEN "$BIN/echo_server" &
+PORT=3300 A2A_TOKEN=$TOKEN "$BIN/a2a_echo_server" &
 PORT=9300 "$STRANDS_PY" -I interop/strands_echo_server.py 2>/dev/null &
 PORT=9301 COMPLIANT=1 "$STRANDS_PY" -I interop/strands_echo_server.py &
 
