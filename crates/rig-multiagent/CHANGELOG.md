@@ -22,7 +22,8 @@ First release.
   run after a failure or a restart, keeping its progress, its pending questions and its
   counted time; `Resumed` events. Graphs save as each node finishes; every agent run
   keeps a journal of its tool results (and answers from people), replayed instead of
-  run again; nested swarms and graphs resume inside their node.
+  run again; nested swarms and graphs resume inside their node. A checkpoint that cannot
+  be read or written fails the run with a typed `CheckpointError`.
 - `Node::run(input, io)` with `NodeIo` (text, questions, saving) replaces the separate
   streaming method.
 - One prompt-cache key per conversation (swarm turn, agent node), stable across

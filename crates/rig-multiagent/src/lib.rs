@@ -33,10 +33,15 @@
 //! ```
 
 #![forbid(unsafe_code)]
-// A failed run carries what it did before failing (the trail, the partial
-// outputs, the usage), so its error is a few hundred bytes. Runs take seconds
-// of model time; moving that on the error path costs nothing worth boxing for.
-#![allow(clippy::result_large_err)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::unreachable
+    )
+)]
 
 mod checkpoint;
 mod events;
@@ -45,6 +50,7 @@ mod human;
 mod node;
 mod swarm;
 
+pub use checkpoint::CheckpointError;
 pub use graph::{Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState};
 pub use human::{HumanNode, Question, human};
 pub use node::{FnNode, Node, NodeError, NodeIo, NodeOutput, node_fn};

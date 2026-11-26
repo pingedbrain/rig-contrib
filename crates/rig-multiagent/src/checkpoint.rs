@@ -4,12 +4,12 @@
 use std::io;
 use std::sync::Arc;
 
-use futures::future::BoxFuture;
 use rig_agent::agent::{
     AgentHook, DispatchAction, DispatchEvent, HookContext, OutcomeAction, OutcomeEvent,
 };
 use rig_core::effect::{Answered, EffectId, EffectKind};
 use rig_core::tool::ToolResult;
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use rig_memory::AsyncStore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -18,19 +18,64 @@ use serde_json::Value;
 use crate::swarm::HANDOFF_TOOL;
 
 /// A rig-memory store's files, behind a trait object.
-trait Files: Send + Sync {
-    fn read<'a>(&'a self, name: &'a str) -> BoxFuture<'a, io::Result<Vec<u8>>>;
-    fn write<'a>(&'a self, name: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, io::Result<()>>;
+trait Files: WasmCompatSend + WasmCompatSync {
+    fn read<'a>(&'a self, name: &'a str) -> WasmBoxedFuture<'a, io::Result<Vec<u8>>>;
+    fn write<'a>(&'a self, name: &'a str, bytes: &'a [u8]) -> WasmBoxedFuture<'a, io::Result<()>>;
 }
 
-impl<S: AsyncStore + Send + Sync + 'static> Files for S {
-    fn read<'a>(&'a self, name: &'a str) -> BoxFuture<'a, io::Result<Vec<u8>>> {
+impl<S: AsyncStore + WasmCompatSend + WasmCompatSync + 'static> Files for S {
+    fn read<'a>(&'a self, name: &'a str) -> WasmBoxedFuture<'a, io::Result<Vec<u8>>> {
         Box::pin(self.read_file_async(name))
     }
 
-    fn write<'a>(&'a self, name: &'a str, bytes: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+    fn write<'a>(&'a self, name: &'a str, bytes: &'a [u8]) -> WasmBoxedFuture<'a, io::Result<()>> {
         Box::pin(self.write_file_async(name, bytes))
     }
+}
+
+/// Why a run's checkpoint could not be read or written.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CheckpointError {
+    /// The run id is not 1-128 of `[A-Za-z0-9_-]`.
+    #[error("run id {0:?} must be 1-128 letters, digits, '-' or '_'")]
+    InvalidRunId(String),
+    /// The store could not read the checkpoint.
+    #[error("could not read checkpoint {name}: {source}")]
+    Read {
+        /// The checkpoint's file name in the store.
+        name: String,
+        /// The store's error.
+        #[source]
+        source: io::Error,
+    },
+    /// The checkpoint is not the JSON this version writes.
+    #[error("checkpoint {name} is unreadable: {source}")]
+    Unreadable {
+        /// The checkpoint's file name in the store.
+        name: String,
+        /// Why it does not parse.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The run's state could not be turned into JSON.
+    #[error("{0}")]
+    Encode(#[source] serde_json::Error),
+    /// The store could not write the checkpoint.
+    #[error("could not write checkpoint {name}: {source}")]
+    Write {
+        /// The checkpoint's file name in the store.
+        name: String,
+        /// The store's error.
+        #[source]
+        source: io::Error,
+    },
+    /// The checkpoint names a graph node the graph does not have.
+    #[error("node {0:?} of the checkpoint is not in the graph")]
+    UnknownNode(String),
+    /// The checkpoint names a swarm agent the swarm does not have.
+    #[error("agent {0:?} of the checkpoint is not in the swarm")]
+    UnknownAgent(String),
 }
 
 /// Where a swarm or graph keeps its runs' checkpoints: one JSON file per
@@ -42,46 +87,54 @@ pub(crate) struct Checkpoints {
 }
 
 impl Checkpoints {
-    pub(crate) fn new(store: impl AsyncStore + Send + Sync + 'static, kind: &'static str) -> Self {
+    pub(crate) fn new(
+        store: impl AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
+        kind: &'static str,
+    ) -> Self {
         Self {
             files: Arc::new(store),
             kind,
         }
     }
 
-    fn name(&self, id: &str) -> Result<String, String> {
+    fn name(&self, id: &str) -> Result<String, CheckpointError> {
         let valid = (1..=128).contains(&id.len())
             && id
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
         if !valid {
-            return Err(format!(
-                "run id {id:?} must be 1-128 letters, digits, '-' or '_'"
-            ));
+            return Err(CheckpointError::InvalidRunId(id.to_owned()));
         }
         Ok(format!("rig-multiagent/{}/{id}.json", self.kind))
     }
 
     /// The run's last checkpoint, if it has one.
-    pub(crate) async fn load<T: DeserializeOwned>(&self, id: &str) -> Result<Option<T>, String> {
+    pub(crate) async fn load<T: DeserializeOwned>(
+        &self,
+        id: &str,
+    ) -> Result<Option<T>, CheckpointError> {
         let name = self.name(id)?;
         match self.files.read(&name).await {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .map(Some)
-                .map_err(|error| format!("checkpoint {name} is unreadable: {error}")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("could not read checkpoint {name}: {error}")),
+                .map_err(|source| CheckpointError::Unreadable { name, source }),
+            Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(CheckpointError::Read { name, source }),
         }
     }
 
     /// Replace the run's checkpoint with `state`.
-    pub(crate) async fn save<T: Serialize>(&self, id: &str, state: &T) -> Result<(), String> {
+    pub(crate) async fn save<T: Serialize>(
+        &self,
+        id: &str,
+        state: &T,
+    ) -> Result<(), CheckpointError> {
         let name = self.name(id)?;
-        let bytes = serde_json::to_vec(state).map_err(|error| error.to_string())?;
+        let bytes = serde_json::to_vec(state).map_err(CheckpointError::Encode)?;
         self.files
             .write(&name, &bytes)
             .await
-            .map_err(|error| format!("could not write checkpoint {name}: {error}"))
+            .map_err(|source| CheckpointError::Write { name, source })
     }
 }
 
@@ -146,7 +199,8 @@ fn part_id(parent: &str, name: &str, n: usize) -> String {
     let hash = id.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
     });
-    format!("{}-{hash:016x}", &id[..111])
+    // Run ids are ASCII; a char boundary keeps any other parent from panicking.
+    format!("{}-{hash:016x}", &id[..id.floor_char_boundary(111)])
 }
 
 /// The results of the tools one agent run executed, kept so that running it
@@ -182,7 +236,7 @@ fn arguments(args: &str) -> Value {
 
 impl Journal {
     /// The journal kept at `saving`, with what it recorded before.
-    pub(crate) async fn open(saving: Saving) -> Result<Self, String> {
+    pub(crate) async fn open(saving: Saving) -> Result<Self, CheckpointError> {
         let recorded: Vec<Entry> = saving
             .checkpoints
             .load(&saving.run_id)

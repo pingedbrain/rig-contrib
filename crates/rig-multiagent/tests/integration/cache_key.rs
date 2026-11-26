@@ -42,9 +42,17 @@ async fn each_swarm_turn_is_one_conversation() {
 
     let first_keys = keys(&first_model);
     let second_keys = keys(&second_model);
-    assert!(first_keys[0].is_some());
-    assert_eq!(first_keys[0], first_keys[1], "one key for the whole turn");
-    assert_ne!(first_keys[0], second_keys[0], "another turn, another key");
+    assert!(first_keys.first().expect("item 0").is_some());
+    assert_eq!(
+        first_keys.first().expect("item 0"),
+        first_keys.get(1).expect("item 1"),
+        "one key for the whole turn"
+    );
+    assert_ne!(
+        first_keys.first().expect("item 0"),
+        second_keys.first().expect("item 0"),
+        "another turn, another key"
+    );
 }
 
 #[tokio::test]
@@ -61,9 +69,10 @@ async fn a_resumed_node_keeps_its_key() {
     graph.run_as("job", "Task").await.unwrap();
 
     let keys = keys(&model);
-    assert!(keys[0].is_some());
+    assert!(keys.first().expect("item 0").is_some());
     assert_eq!(
-        keys[0], keys[1],
+        keys.first().expect("item 0"),
+        keys.get(1).expect("item 1"),
         "the retried node continues the same conversation"
     );
 }

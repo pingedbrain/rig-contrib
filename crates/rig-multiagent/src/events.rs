@@ -3,17 +3,29 @@
 use std::future::Future;
 use std::task::Poll;
 
-use futures::future::BoxFuture;
-use futures::stream::{self, BoxStream};
+use futures::stream;
 use futures::{FutureExt, StreamExt};
 use rig_agent::agent::{AgentRunner, MultiTurnStreamItem, PromptResponse};
 use rig_agent::completion::PromptError;
 use rig_core::error::{ErrorKind, ErrorReport};
 use rig_core::streaming::{Item, StreamEvent};
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmBoxedStream, WasmCompatSend};
 use tokio::sync::mpsc;
 
 /// Where a run reports its events.
+#[cfg(not(target_family = "wasm"))]
 pub(crate) type Emit<'a, E> = &'a (dyn Fn(E) + Send + Sync);
+/// Where a run reports its events (browser wasm: no `Send + Sync`, no threads).
+#[cfg(target_family = "wasm")]
+pub(crate) type Emit<'a, E> = &'a dyn Fn(E);
+
+/// Where a run reports the text its agents write.
+#[cfg(not(target_family = "wasm"))]
+pub(crate) type EmitText<'a> = &'a (dyn Fn(&str) + Send + Sync);
+/// Where a run reports the text its agents write (browser wasm: no
+/// `Send + Sync`, no threads).
+#[cfg(target_family = "wasm")]
+pub(crate) type EmitText<'a> = &'a dyn Fn(&str);
 
 /// The events `run` reports, as they happen, then `finish(result)`.
 ///
@@ -22,18 +34,18 @@ pub(crate) type Emit<'a, E> = &'a (dyn Fn(E) + Send + Sync);
 pub(crate) fn events<'a, E, R, F>(
     run: impl FnOnce(mpsc::UnboundedSender<E>) -> F,
     finish: fn(R) -> E,
-) -> BoxStream<'a, E>
+) -> WasmBoxedStream<'a, E>
 where
-    E: Send + 'a,
-    R: Send + 'a,
-    F: Future<Output = R> + Send + 'a,
+    E: WasmCompatSend + 'a,
+    R: WasmCompatSend + 'a,
+    F: Future<Output = R> + WasmCompatSend + 'a,
 {
     // ponytail: unbounded, since events are small and a consumer that stops
     // reading also stops the run; bound it if a run ever outpaces its reader.
     let (sender, mut receiver) = mpsc::unbounded_channel();
-    let mut run: Option<BoxFuture<'a, R>> = Some(run(sender).boxed());
+    let mut run: Option<WasmBoxedFuture<'a, R>> = Some(Box::pin(run(sender)));
     let mut result = None;
-    stream::poll_fn(move |cx| {
+    Box::pin(stream::poll_fn(move |cx| {
         if let Some(future) = run.as_mut()
             && let Poll::Ready(done) = future.poll_unpin(cx)
         {
@@ -47,15 +59,14 @@ where
             Poll::Ready(None) => Poll::Ready(result.take().map(finish)),
             Poll::Pending => Poll::Pending,
         }
-    })
-    .boxed()
+    }))
 }
 
 /// Run an agent in streaming mode, passing its text to `on_text` as the
 /// model writes it.
 pub(crate) async fn stream_agent(
     runner: AgentRunner,
-    on_text: &(dyn Fn(&str) + Send + Sync),
+    on_text: EmitText<'_>,
 ) -> Result<PromptResponse, PromptError> {
     let mut stream = runner.stream();
     while let Some(item) = stream.next().await {

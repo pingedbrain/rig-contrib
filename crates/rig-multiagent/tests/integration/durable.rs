@@ -41,7 +41,10 @@ impl Tool for SendMail {
 
     async fn call(&self, _context: &mut ToolContext, args: Value) -> Result<String, Never> {
         let sent = self.0.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(format!("mail #{sent} sent to {}", args["to"]))
+        Ok(format!(
+            "mail #{sent} sent to {}",
+            args.get("to").expect("a recipient")
+        ))
     }
 }
 
@@ -60,7 +63,14 @@ fn send_to(who: &str) -> MockTurn {
 }
 
 fn sent(model: &MockCompletionModel, request: usize) -> String {
-    serde_json::to_string(&model.requests()[request].chat_history).unwrap()
+    serde_json::to_string(
+        &model
+            .requests()
+            .get(request)
+            .expect("the request")
+            .chat_history,
+    )
+    .unwrap()
 }
 
 fn counted(text: &'static str, millis: u64) -> (impl Node, Arc<AtomicUsize>) {

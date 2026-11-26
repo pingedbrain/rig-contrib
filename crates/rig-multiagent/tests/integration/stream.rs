@@ -57,7 +57,7 @@ fn graph_line(event: &GraphEvent) -> String {
 }
 
 #[tokio::test]
-async fn a_streamed_swarm_reports_turns_text_and_handoffs() -> anyhow::Result<()> {
+async fn a_streamed_swarm_reports_turns_text_and_handoffs() {
     let researcher = streaming(
         "researcher",
         vec![vec![
@@ -70,7 +70,11 @@ async fn a_streamed_swarm_reports_turns_text_and_handoffs() -> anyhow::Result<()
         ]],
     );
     let coder = streaming("coder", vec![vec![text("fn "), text("parse() {}")]]);
-    let swarm = Swarm::builder().agent(researcher).agent(coder).build()?;
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .build()
+        .expect("the builder is valid");
 
     let lines: Vec<String> = swarm
         .stream("Parse it")
@@ -90,11 +94,10 @@ async fn a_streamed_swarm_reports_turns_text_and_handoffs() -> anyhow::Result<()
             "done coder: fn parse() {}",
         ]
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn a_streamed_graph_reports_nodes_and_their_text() -> anyhow::Result<()> {
+async fn a_streamed_graph_reports_nodes_and_their_text() {
     let writer = streaming("writer", vec![vec![text("hello "), text("world")]]);
     let shout = node_fn(|input: String| -> Reply {
         Box::pin(async move { Ok(input.lines().last().unwrap_or_default().to_uppercase()) })
@@ -103,7 +106,8 @@ async fn a_streamed_graph_reports_nodes_and_their_text() -> anyhow::Result<()> {
         .node("write", writer)
         .node("shout", shout)
         .edge("write", "shout")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
     let lines: Vec<String> = graph
         .stream("Greet")
@@ -123,13 +127,15 @@ async fn a_streamed_graph_reports_nodes_and_their_text() -> anyhow::Result<()> {
             "done: HELLO WORLD",
         ]
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn failures_stream_too_and_the_outcome_comes_last() -> anyhow::Result<()> {
+async fn failures_stream_too_and_the_outcome_comes_last() {
     let broken = node_fn(|_: String| -> Reply { Box::pin(async { Err("disk full".into()) }) });
-    let graph = Graph::builder().node("broken", broken).build()?;
+    let graph = Graph::builder()
+        .node("broken", broken)
+        .build()
+        .expect("the builder is valid");
 
     let lines: Vec<String> = graph
         .stream("Task")
@@ -145,11 +151,10 @@ async fn failures_stream_too_and_the_outcome_comes_last() -> anyhow::Result<()> 
             r#"failed: node "broken" failed: disk full"#,
         ]
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn a_swarm_inside_a_graph_streams_its_text_under_the_node() -> anyhow::Result<()> {
+async fn a_swarm_inside_a_graph_streams_its_text_under_the_node() {
     let planner = streaming(
         "planner",
         vec![vec![
@@ -162,8 +167,15 @@ async fn a_swarm_inside_a_graph_streams_its_text_under_the_node() -> anyhow::Res
         ]],
     );
     let builder = streaming("builder", vec![vec![text("built")]]);
-    let swarm = Swarm::builder().agent(planner).agent(builder).build()?;
-    let graph = Graph::builder().node("team", swarm).build()?;
+    let swarm = Swarm::builder()
+        .agent(planner)
+        .agent(builder)
+        .build()
+        .expect("the builder is valid");
+    let graph = Graph::builder()
+        .node("team", swarm)
+        .build()
+        .expect("the builder is valid");
 
     let lines: Vec<String> = graph
         .stream("Make it")
@@ -181,11 +193,10 @@ async fn a_swarm_inside_a_graph_streams_its_text_under_the_node() -> anyhow::Res
             "done: built"
         ]
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn dropping_the_stream_stops_the_run() -> anyhow::Result<()> {
+async fn dropping_the_stream_stops_the_run() {
     let ran = Arc::new(AtomicUsize::new(0));
     let counter = ran.clone();
     let slow = node_fn(move |_: String| -> Reply {
@@ -196,7 +207,10 @@ async fn dropping_the_stream_stops_the_run() -> anyhow::Result<()> {
             Ok("done".into())
         })
     });
-    let graph = Graph::builder().node("slow", slow).build()?;
+    let graph = Graph::builder()
+        .node("slow", slow)
+        .build()
+        .expect("the builder is valid");
 
     let mut events = graph.stream("Task");
     assert!(matches!(
@@ -207,5 +221,4 @@ async fn dropping_the_stream_stops_the_run() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(ran.load(Ordering::SeqCst), 0);
-    Ok(())
 }

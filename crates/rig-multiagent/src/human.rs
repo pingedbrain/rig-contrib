@@ -5,7 +5,7 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
+use rig_core::wasm_compat::WasmBoxedFuture;
 use tokio::sync::oneshot;
 
 use crate::node::{Node, NodeError, NodeIo, NodeOutput};
@@ -132,7 +132,7 @@ impl Node for HumanNode {
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move { Ok(NodeOutput::new(io.ask(&self.question, input).await?)) })
     }
 }

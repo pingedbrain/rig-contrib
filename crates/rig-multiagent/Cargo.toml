@@ -23,7 +23,6 @@ tokio = { version = "1.54.1", features = ["macros", "sync", "time"] }
 tracing = "0.1"
 
 [dev-dependencies]
-anyhow = "1.0.105"
 tokio = { version = "1.54.1", features = ["full"] }
 rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }

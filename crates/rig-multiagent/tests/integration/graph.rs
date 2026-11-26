@@ -44,7 +44,7 @@ fn tokens(input: u64, output: u64) -> Usage {
 }
 
 #[tokio::test]
-async fn an_agent_feeds_a_function() -> anyhow::Result<()> {
+async fn an_agent_feeds_a_function() {
     let model =
         MockCompletionModel::from_turns([MockTurn::text("three facts").with_usage(tokens(8, 3))]);
     let research = AgentBuilder::new(model.clone()).name("research").build();
@@ -53,9 +53,10 @@ async fn an_agent_feeds_a_function() -> anyhow::Result<()> {
         .node("research", research)
         .node("shout", shout)
         .edge("research", "shout")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
-    let run = graph.run("Find facts").await?;
+    let run = graph.run("Find facts").await.expect("the run succeeds");
 
     assert_eq!(run.answer(), "THREE FACTS");
     assert_eq!(run.output("research"), Some("three facts"));
@@ -65,16 +66,16 @@ async fn an_agent_feeds_a_function() -> anyhow::Result<()> {
         inputs.lock().unwrap().as_slice(),
         ["Original task: Find facts\n\nInputs from previous nodes:\n\nFrom research:\nthree facts"]
     );
-    let sent = serde_json::to_string(&model.requests()[0].chat_history)?;
+    let sent = serde_json::to_string(&model.requests().first().expect("item 0").chat_history)
+        .expect("the history serializes");
     assert!(
         sent.contains(r#""text":"Find facts""#),
         "the entry node gets the task: {sent}"
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn branches_run_in_parallel_and_join_once() -> anyhow::Result<()> {
+async fn branches_run_in_parallel_and_join_once() {
     let (join, inputs) = recording("joined");
     let graph = Graph::builder()
         .node("split", sleeping("split", 0))
@@ -85,10 +86,11 @@ async fn branches_run_in_parallel_and_join_once() -> anyhow::Result<()> {
         .edge("split", "right")
         .edge("left", "join")
         .edge("right", "join")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
     let started = Instant::now();
-    let run = graph.run("Task").await?;
+    let run = graph.run("Task").await.expect("the run succeeds");
 
     assert!(
         started.elapsed() < Duration::from_millis(550),
@@ -99,14 +101,19 @@ async fn branches_run_in_parallel_and_join_once() -> anyhow::Result<()> {
     let inputs = inputs.lock().unwrap();
     assert_eq!(inputs.len(), 1);
     assert!(
-        inputs[0].contains("From left:\nfrom left")
-            && inputs[0].contains("From right:\nfrom right")
+        inputs
+            .first()
+            .expect("item 0")
+            .contains("From left:\nfrom left")
+            && inputs
+                .first()
+                .expect("item 0")
+                .contains("From right:\nfrom right")
     );
-    Ok(())
 }
 
 #[tokio::test]
-async fn conditional_edges_pick_the_branch() -> anyhow::Result<()> {
+async fn conditional_edges_pick_the_branch() {
     let graph = Graph::builder()
         .node("triage", sleeping("bug", 0))
         .node("fix", sleeping("patched", 0))
@@ -117,17 +124,17 @@ async fn conditional_edges_pick_the_branch() -> anyhow::Result<()> {
         .edge_if("triage", "docs", |state: &GraphState| {
             state.output("triage") != Some("bug")
         })
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
-    let run = graph.run("Task").await?;
+    let run = graph.run("Task").await.expect("the run succeeds");
 
     assert_eq!(run.answer(), "patched");
     assert_eq!(run.state.runs("docs"), 0);
-    Ok(())
 }
 
 #[tokio::test]
-async fn a_review_loop_runs_until_approved() -> anyhow::Result<()> {
+async fn a_review_loop_runs_until_approved() {
     let drafts = Arc::new(AtomicUsize::new(0));
     let count = drafts.clone();
     let writer = node_fn(move |_: String| -> Reply {
@@ -161,18 +168,18 @@ async fn a_review_loop_runs_until_approved() -> anyhow::Result<()> {
         .edge_if("review", "write", needs_work)
         .entry("write")
         .max_node_executions(10)
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
-    let run = graph.run("Write a haiku").await?;
+    let run = graph.run("Write a haiku").await.expect("the run succeeds");
 
     assert_eq!(run.state.order(), ["write", "review", "write", "review"]);
     assert_eq!(run.answer(), "APPROVED");
     assert_eq!(run.output("write"), Some("draft 2"));
-    Ok(())
 }
 
 #[tokio::test]
-async fn a_failed_node_stops_its_branch_only() -> anyhow::Result<()> {
+async fn a_failed_node_stops_its_branch_only() {
     let broken = node_fn(|_: String| -> Reply { Box::pin(async { Err("disk full".into()) }) });
     let graph = Graph::builder()
         .node("start", sleeping("go", 0))
@@ -182,35 +189,35 @@ async fn a_failed_node_stops_its_branch_only() -> anyhow::Result<()> {
         .edge("start", "broken")
         .edge("broken", "after_broken")
         .edge("start", "healthy")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
     let error = graph.run("Task").await.unwrap_err();
 
     assert_eq!(error.failures.len(), 1);
     assert!(
-        matches!(&error.failures[0], GraphFailure::Node { node, source } if node == "broken" && source.to_string() == "disk full")
+        matches!(&error.failures.first().expect("item 0"), GraphFailure::Node { node, source } if node == "broken" && source.to_string() == "disk full")
     );
     assert_eq!(error.run.output("healthy"), Some("fine"));
     assert_eq!(error.run.state.runs("after_broken"), 0);
     assert_eq!(error.to_string(), r#"node "broken" failed: disk full"#);
-    Ok(())
 }
 
 #[tokio::test]
-async fn a_slow_node_times_out() -> anyhow::Result<()> {
+async fn a_slow_node_times_out() {
     let graph = Graph::builder()
         .node("slow", sleeping("late", 5_000))
         .node_timeout(Duration::from_millis(50))
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
     let error = graph.run("Task").await.unwrap_err();
 
     assert!(matches!(&error.failures[..], [GraphFailure::NodeTimeout { node }] if node == "slow"));
-    Ok(())
 }
 
 #[tokio::test]
-async fn an_endless_loop_hits_the_execution_limit() -> anyhow::Result<()> {
+async fn an_endless_loop_hits_the_execution_limit() {
     let graph = Graph::builder()
         .node("a", sleeping("a", 0))
         .node("b", sleeping("b", 0))
@@ -218,7 +225,8 @@ async fn an_endless_loop_hits_the_execution_limit() -> anyhow::Result<()> {
         .edge("b", "a")
         .entry("a")
         .max_node_executions(5)
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
     let error = graph.run("Task").await.unwrap_err();
 
@@ -227,11 +235,10 @@ async fn an_endless_loop_hits_the_execution_limit() -> anyhow::Result<()> {
         [GraphFailure::MaxNodeExecutions { limit: 5 }]
     ));
     assert_eq!(error.run.state.order().len(), 5);
-    Ok(())
 }
 
 #[tokio::test]
-async fn swarms_and_graphs_nest() -> anyhow::Result<()> {
+async fn swarms_and_graphs_nest() {
     let planner = AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::tool_call(
         "call-1",
         rig_multiagent::HANDOFF_TOOL,
@@ -245,7 +252,11 @@ async fn swarms_and_graphs_nest() -> anyhow::Result<()> {
     ]))
     .name("builder")
     .build();
-    let swarm = Swarm::builder().agent(planner).agent(builder).build()?;
+    let swarm = Swarm::builder()
+        .agent(planner)
+        .agent(builder)
+        .build()
+        .expect("the builder is valid");
     let inner = Graph::builder()
         .node("team", swarm)
         .node(
@@ -260,25 +271,33 @@ async fn swarms_and_graphs_nest() -> anyhow::Result<()> {
             }),
         )
         .edge("team", "stamp")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
     let (outer_last, inputs) = recording("shipped");
     let outer = Graph::builder()
         .node("inner", inner)
         .node("ship", outer_last)
         .edge("inner", "ship")
-        .build()?;
+        .build()
+        .expect("the builder is valid");
 
-    let run = outer.run("Make a thing").await?;
+    let run = outer.run("Make a thing").await.expect("the run succeeds");
 
     assert_eq!(run.output("inner"), Some("stamped(built)"));
     assert_eq!(run.answer(), "shipped");
-    assert!(inputs.lock().unwrap()[0].ends_with("From inner:\nstamped(built)"));
+    assert!(
+        inputs
+            .lock()
+            .unwrap()
+            .first()
+            .expect("item 0")
+            .ends_with("From inner:\nstamped(built)")
+    );
     assert_eq!(
         run.usage.input_tokens,
         Some(12),
         "usage adds up through the nesting"
     );
-    Ok(())
 }
 
 #[test]

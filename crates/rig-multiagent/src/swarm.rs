@@ -5,20 +5,19 @@ use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use rig_agent::Agent;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_agent::completion::PromptError;
 use rig_core::completion::Usage;
 use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmBoxedStream, WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
 use crate::BuildError;
-use crate::checkpoint::{Checkpoints, Journal, Saving};
+use crate::checkpoint::{CheckpointError, Checkpoints, Journal, Saving};
 use crate::events::{Emit, events, stream_agent};
 use crate::human::{Clock, Question, answer};
 use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput, in_conversation};
@@ -46,8 +45,9 @@ pub struct Swarm {
 }
 
 struct Inner {
-    members: Vec<Member>,
-    entry: usize,
+    members: Vec<Arc<Member>>,
+    /// The member the run starts with, one of `members`.
+    entry: Arc<Member>,
     max_handoffs: usize,
     execution_timeout: Duration,
     agent_timeout: Duration,
@@ -155,7 +155,7 @@ impl SwarmBuilder {
     /// `DirStore`, a database), so a run that stopped resumes where it was.
     pub fn checkpoints(
         mut self,
-        store: impl rig_memory::AsyncStore + Send + Sync + 'static,
+        store: impl rig_memory::AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
     ) -> Self {
         self.checkpoints = Some(Checkpoints::new(store, "swarm"));
         self
@@ -178,13 +178,15 @@ impl SwarmBuilder {
                 agent,
             });
         }
+        let members: Vec<Arc<Member>> = members.into_iter().map(Arc::new).collect();
         let entry = match &self.entry {
-            None => 0,
+            None => members.first().ok_or(BuildError::Empty)?,
             Some(name) => members
                 .iter()
-                .position(|member| &member.name == name)
+                .find(|member| &member.name == name)
                 .ok_or_else(|| BuildError::UnknownName(name.clone()))?,
-        };
+        }
+        .clone();
         for member in &members {
             if members.len() > 1 {
                 member.agent.tool_server_handle().add_tool(HandoffTool);
@@ -284,7 +286,8 @@ pub enum SwarmFailure {
     #[error("checkpoint: {error}")]
     Checkpoint {
         /// What went wrong.
-        error: String,
+        #[source]
+        error: CheckpointError,
     },
     /// The work kept bouncing among a few agents; see
     /// [`SwarmBuilder::detect_repetition`].
@@ -374,7 +377,7 @@ impl Trail {
 impl Swarm {
     /// Run the swarm on `task` until an agent answers.
     pub async fn run(&self, task: impl Into<String>) -> Result<SwarmRun, SwarmError> {
-        let entry = &self.inner.members[self.inner.entry].name;
+        let entry = &self.inner.entry.name;
         let span = tracing::info_span!("swarm.run", swarm.entry = %entry);
         self.run_task(task.into(), None, false, None)
             .instrument(span)
@@ -396,7 +399,7 @@ impl Swarm {
         run_id: &str,
         task: impl Into<String>,
     ) -> Result<SwarmRun, SwarmError> {
-        let entry = &self.inner.members[self.inner.entry].name;
+        let entry = &self.inner.entry.name;
         let span = tracing::info_span!("swarm.run", swarm.entry = %entry, swarm.run_id = %run_id);
         self.run_task(task.into(), self.saving(Some(run_id)), false, None)
             .instrument(span)
@@ -426,7 +429,7 @@ impl Swarm {
     /// }
     /// # }
     /// ```
-    pub fn stream(&self, task: impl Into<String>) -> BoxStream<'_, SwarmEvent> {
+    pub fn stream(&self, task: impl Into<String>) -> WasmBoxedStream<'_, SwarmEvent> {
         self.stream_events(task.into(), None)
     }
 
@@ -437,7 +440,7 @@ impl Swarm {
         &'a self,
         run_id: &'a str,
         task: impl Into<String>,
-    ) -> BoxStream<'a, SwarmEvent> {
+    ) -> WasmBoxedStream<'a, SwarmEvent> {
         self.stream_events(task.into(), Some(run_id))
     }
 
@@ -445,8 +448,8 @@ impl Swarm {
         &'a self,
         task: String,
         run_id: Option<&'a str>,
-    ) -> BoxStream<'a, SwarmEvent> {
-        let entry = self.inner.members[self.inner.entry].name.clone();
+    ) -> WasmBoxedStream<'a, SwarmEvent> {
+        let entry = self.inner.entry.name.clone();
         events(
             move |sender| {
                 async move {
@@ -514,7 +517,7 @@ impl Swarm {
             None => (
                 task,
                 Trail::default(),
-                inner.entry,
+                Arc::clone(&inner.entry),
                 None,
                 Clock::resumed(Duration::ZERO),
                 Duration::ZERO,
@@ -523,12 +526,10 @@ impl Swarm {
                 let Some(current) = inner
                     .members
                     .iter()
-                    .position(|member| member.name == saved.current)
+                    .find(|member| member.name == saved.current)
+                    .cloned()
                 else {
-                    let error = format!(
-                        "agent {:?} of the checkpoint is not in the swarm",
-                        saved.current
-                    );
+                    let error = CheckpointError::UnknownAgent(saved.current);
                     return Err(saved.trail.fail(SwarmFailure::Checkpoint { error }));
                 };
                 tracing::info!(agent = %saved.current, handoffs = saved.trail.handoffs.len(), "swarm run resumed");
@@ -563,7 +564,7 @@ impl Swarm {
             elapsed_ms: millis(before + started.elapsed()),
         };
         loop {
-            let member = &inner.members[current];
+            let member = Arc::clone(&current);
             if let Some((id, checkpoints)) = checkpoints {
                 let saved = snapshot(&trail, &member.name, &message, None);
                 if let Err(error) = checkpoints.save(id, &saved).await {
@@ -575,8 +576,8 @@ impl Swarm {
                 && window > 0
                 && trail.agents.len() >= window
             {
-                let recent = &trail.agents[trail.agents.len() - window..];
-                let unique = recent.iter().collect::<HashSet<_>>().len();
+                let recent = trail.agents.iter().rev().take(window);
+                let unique = recent.collect::<HashSet<_>>().len();
                 if unique < min_unique {
                     return Err(trail.fail(SwarmFailure::Repetitive { window, unique }));
                 }
@@ -584,14 +585,14 @@ impl Swarm {
             let budget = inner
                 .agent_timeout
                 .min(inner.execution_timeout.saturating_sub(clock.active()));
-            let input = self.input(current, &task, message.as_deref(), &trail);
+            let input = self.input(&member, &task, message.as_deref(), &trail);
             let turn = Arc::new(Turn {
                 agent: member.name.clone(),
                 others: inner
                     .members
                     .iter()
                     .filter(|other| other.name != member.name)
-                    .map(|other| other.name.clone())
+                    .cloned()
                     .collect(),
                 handoff: Mutex::new(None),
                 questions: Mutex::new(None),
@@ -653,17 +654,13 @@ impl Swarm {
                     let agent = member.name.clone();
                     return Err(trail.fail(SwarmFailure::Timeout { agent }));
                 }
-                (Some(_), Some(handoff)) => {
+                (Some(_), Some((handoff, next))) => {
                     if trail.handoffs.len() >= inner.max_handoffs {
                         let limit = inner.max_handoffs;
                         return Err(trail.fail(SwarmFailure::MaxHandoffs { limit }));
                     }
                     tracing::debug!(from = %handoff.from, to = %handoff.to, "swarm handoff");
-                    current = inner
-                        .members
-                        .iter()
-                        .position(|other| other.name == handoff.to)
-                        .expect("the handoff tool accepts only members");
+                    current = next;
                     if let Some(context) = &handoff.context {
                         trail.shared.push((handoff.from.clone(), context.clone()));
                     }
@@ -702,14 +699,18 @@ impl Swarm {
     }
 
     /// The prompt an agent's turn starts with.
-    fn input(&self, current: usize, task: &str, message: Option<&str>, trail: &Trail) -> String {
+    fn input(&self, current: &Member, task: &str, message: Option<&str>, trail: &Trail) -> String {
         let members = &self.inner.members;
         let mut text = String::new();
         if let (Some(message), Some(last)) = (message, trail.handoffs.last()) {
             let _ = write!(text, "Handoff from {}: {message}\n\n", last.from);
         }
         let _ = write!(text, "User request: {task}\n\n");
-        let before = &trail.agents[..trail.agents.len() - 1];
+        let before: &[String] = trail
+            .agents
+            .split_last()
+            .map(|(_, before)| before)
+            .unwrap_or_default();
         if !before.is_empty() {
             let _ = write!(
                 text,
@@ -726,9 +727,8 @@ impl Swarm {
         }
         let others: Vec<&Member> = members
             .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != current)
-            .map(|(_, member)| member)
+            .filter(|member| member.name != current.name)
+            .map(|member| &**member)
             .collect();
         if !others.is_empty() {
             text.push_str("Other agents you can hand off to:\n");
@@ -769,7 +769,7 @@ impl Node for Swarm {
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let saving = io.saving().map(|saving| {
                 let checkpoints = self.inner.checkpoints.clone();
@@ -792,8 +792,10 @@ impl Node for Swarm {
 /// One agent's turn, as the handoff tool and hook see it.
 struct Turn {
     agent: String,
-    others: Vec<String>,
-    handoff: Mutex<Option<Handoff>>,
+    /// The members it can hand off to.
+    others: Vec<Arc<Member>>,
+    /// The handoff it made, with the member it hands off to.
+    handoff: Mutex<Option<(Handoff, Arc<Member>)>>,
     /// Where the ask tool sends questions; `None` when nobody can answer.
     questions: Mutex<Option<mpsc::UnboundedSender<Question>>>,
 }
@@ -805,11 +807,11 @@ impl Turn {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Handoff>> {
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<(Handoff, Arc<Member>)>> {
         self.handoff.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn take(&self) -> Option<Handoff> {
+    fn take(&self) -> Option<(Handoff, Arc<Member>)> {
         self.slot().take()
     }
 }
@@ -879,23 +881,30 @@ impl Tool for HandoffTool {
         if args.agent_name == turn.agent {
             return Err(HandoffError::ToSelf(turn.agent.clone()));
         }
-        if !turn.others.contains(&args.agent_name) {
-            return Err(HandoffError::Unknown(
-                args.agent_name,
-                turn.others.join(", "),
-            ));
-        }
+        let Some(next) = turn
+            .others
+            .iter()
+            .find(|other| other.name == args.agent_name)
+        else {
+            let names: Vec<&str> = turn
+                .others
+                .iter()
+                .map(|other| other.name.as_str())
+                .collect();
+            return Err(HandoffError::Unknown(args.agent_name, names.join(", ")));
+        };
         let mut slot = turn.slot();
-        if let Some(earlier) = &*slot {
+        if let Some((earlier, _)) = &*slot {
             return Err(HandoffError::Twice(earlier.to.clone()));
         }
         let reply = format!("Handing off to {}.", args.agent_name);
-        *slot = Some(Handoff {
+        let handoff = Handoff {
             from: turn.agent.clone(),
             to: args.agent_name,
             message: args.message,
             context: args.context.filter(|context| !context.is_null()),
-        });
+        };
+        *slot = Some((handoff, Arc::clone(next)));
         Ok(reply)
     }
 }

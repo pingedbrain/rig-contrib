@@ -3,19 +3,19 @@
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use futures::future::BoxFuture;
 use rig_agent::Agent;
 use rig_agent::AgentRunner;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_core::completion::GenerationOptions;
 use rig_core::completion::Usage;
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
 use crate::checkpoint::{Journal, Saving};
-use crate::events::stream_agent;
+use crate::events::{Emit, EmitText, stream_agent};
 use crate::human::{Question, answer};
 
-/// Why a node failed.
-pub type NodeError = Box<dyn std::error::Error + Send + Sync>;
+/// Why a node failed: a boxed error, `Send + Sync` except on wasm.
+pub type NodeError = rig_core::error::BoxError;
 
 /// What a node produced.
 #[derive(Debug, Clone, Default)]
@@ -49,7 +49,7 @@ impl NodeOutput {
 ///
 /// Implemented for Rig agents, [`Swarm`](crate::Swarm)s, [`Graph`](crate::Graph)s,
 /// [`human`](crate::human) and, through [`node_fn`], async functions.
-pub trait Node: Send + Sync {
+pub trait Node: WasmCompatSend + WasmCompatSync {
     /// Run the step on `input`. Through `io` it can report the text it
     /// writes and ask a person, when the graph run is
     /// [streamed](crate::Graph::stream).
@@ -57,15 +57,15 @@ pub trait Node: Send + Sync {
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>>;
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>>;
 }
 
 /// What a node can do while it runs: report text and ask a person (in a
 /// streamed run), and keep its progress (in a checkpointed one).
 pub struct NodeIo<'a> {
     node: &'a str,
-    text: Option<&'a (dyn Fn(&str) + Send + Sync)>,
-    question: Option<&'a (dyn Fn(Question) + Send + Sync)>,
+    text: Option<EmitText<'a>>,
+    question: Option<Emit<'a, Question>>,
     saving: Option<Saving>,
 }
 
@@ -83,11 +83,7 @@ impl<'a> NodeIo<'a> {
 
     /// The view of node `node` in a streamed run: its text goes to `text`,
     /// its questions to `question`.
-    pub fn streaming(
-        node: &'a str,
-        text: &'a (dyn Fn(&str) + Send + Sync),
-        question: &'a (dyn Fn(Question) + Send + Sync),
-    ) -> Self {
+    pub fn streaming(node: &'a str, text: EmitText<'a>, question: Emit<'a, Question>) -> Self {
         Self {
             node,
             text: Some(text),
@@ -153,7 +149,7 @@ impl Node for Agent {
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let meter = Meter::default();
             let key = io.saving().map(|saving| saving.run_id.clone());
@@ -184,22 +180,22 @@ pub struct FnNode<F>(F);
 /// ```
 pub fn node_fn<F, Fut>(f: F) -> FnNode<F>
 where
-    F: Fn(String) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<String, NodeError>> + Send + 'static,
+    F: Fn(String) -> Fut + WasmCompatSend + WasmCompatSync,
+    Fut: Future<Output = Result<String, NodeError>> + WasmCompatSend + 'static,
 {
     FnNode(f)
 }
 
 impl<F, Fut> Node for FnNode<F>
 where
-    F: Fn(String) -> Fut + Send + Sync,
-    Fut: Future<Output = Result<String, NodeError>> + Send + 'static,
+    F: Fn(String) -> Fut + WasmCompatSend + WasmCompatSync,
+    Fut: Future<Output = Result<String, NodeError>> + WasmCompatSend + 'static,
 {
     fn run<'a>(
         &'a self,
         input: String,
         _io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
         let future = (self.0)(input);
         Box::pin(async move { Ok(NodeOutput::new(future.await?)) })
     }

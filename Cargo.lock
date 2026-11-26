@@ -2101,7 +2101,6 @@ dependencies = [
 name = "rig-multiagent"
 version = "0.47.0"
 dependencies = [
- "anyhow",
  "futures",
  "rig-agent",
  "rig-core",

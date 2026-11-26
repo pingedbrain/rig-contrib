@@ -74,7 +74,7 @@ async fn an_approval_gates_the_work_after_it() {
     let run = outcome.unwrap();
 
     assert_eq!(asked.len(), 1);
-    let (from, question, context) = &asked[0];
+    let (from, question, context) = &asked.first().expect("item 0");
     assert_eq!(
         (from.as_str(), question.as_str()),
         ("approve", "Deploy this release?")
@@ -195,12 +195,19 @@ async fn an_agent_asks_and_carries_on_with_the_answer() {
     assert_eq!(run.answer, "Using Postgres.");
     let requests = model.requests();
     assert!(
-        sent(&requests[0]).contains(ASK_TOOL),
+        sent(requests.first().expect("item 0")).contains(ASK_TOOL),
         "the prompt mentions the tool"
     );
-    assert!(requests[0].tools.iter().any(|tool| tool.name == ASK_TOOL));
     assert!(
-        sent(&requests[1]).contains("Postgres"),
+        requests
+            .first()
+            .expect("item 0")
+            .tools
+            .iter()
+            .any(|tool| tool.name == ASK_TOOL)
+    );
+    assert!(
+        sent(requests.get(1).expect("item 1")).contains("Postgres"),
         "the answer is the tool result"
     );
 }
@@ -224,7 +231,7 @@ async fn in_a_plain_run_the_agent_is_told_nobody_can_answer() {
     let run = swarm.run("Set up storage").await.unwrap();
 
     assert_eq!(run.answer, "Picked SQLite myself.");
-    assert!(sent(&model.requests()[1]).contains("nobody can answer"));
+    assert!(sent(model.requests().get(1).expect("item 1")).contains("nobody can answer"));
 }
 
 #[tokio::test]
@@ -239,7 +246,7 @@ async fn questions_from_a_nested_swarm_name_the_node() {
 
     let (asked, outcome) = answer_graph(&graph, "Postgres", Duration::ZERO).await;
 
-    assert_eq!(asked[0].0, "team/planner");
+    assert_eq!(asked.first().expect("item 0").0, "team/planner");
     assert_eq!(outcome.unwrap().answer(), "Using Postgres.");
 }
 
@@ -255,6 +262,6 @@ async fn swarms_do_not_ask_unless_allowed() {
         .await
         .unwrap();
 
-    assert!(model.requests()[0].tools.is_empty());
-    assert!(!sent(&model.requests()[0]).contains(ASK_TOOL));
+    assert!(model.requests().first().expect("item 0").tools.is_empty());
+    assert!(!sent(model.requests().first().expect("item 0")).contains(ASK_TOOL));
 }

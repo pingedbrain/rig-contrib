@@ -133,7 +133,7 @@ async fn a_swarm_resumes_in_a_new_process() {
     let events: Vec<SwarmEvent> = swarm.stream_as("job-2", "Do it").collect().await;
 
     assert!(
-        matches!(&events[0], SwarmEvent::Resumed { agent, handoffs: 1 } if agent == "second"),
+        matches!(&events.first().expect("item 0"), SwarmEvent::Resumed { agent, handoffs: 1 } if agent == "second"),
         "{events:?}"
     );
     let SwarmEvent::Finished(outcome) = events.last().unwrap() else {
@@ -164,11 +164,11 @@ async fn a_finished_run_id_starts_over() {
         .await
         .unwrap();
     let saved: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(saved["finished"], true);
+    assert_eq!(saved.get("finished"), Some(&serde_json::Value::Bool(true)));
 
     assert_eq!(swarm.run_as("job-3", "Second").await.unwrap().answer, "two");
     assert!(
-        serde_json::to_string(&model.requests()[1].chat_history)
+        serde_json::to_string(&model.requests().get(1).expect("item 1").chat_history)
             .unwrap()
             .contains("Second")
     );

@@ -6,20 +6,24 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures::StreamExt;
-use futures::future::BoxFuture;
-use futures::stream::BoxStream;
 use futures::stream::FuturesUnordered;
 use rig_core::completion::Usage;
+use rig_core::wasm_compat::{WasmBoxedFuture, WasmBoxedStream, WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::BuildError;
-use crate::checkpoint::{Checkpoints, Saving};
+use crate::checkpoint::{CheckpointError, Checkpoints, Saving};
 use crate::events::{Emit, events};
 use crate::human::{Clock, Question};
 use crate::node::{Node, NodeError, NodeIo, NodeOutput};
 
+/// An edge's condition.
+#[cfg(not(target_family = "wasm"))]
 type Condition = Arc<dyn Fn(&GraphState) -> bool + Send + Sync>;
+/// An edge's condition (browser wasm: no `Send + Sync`, no threads).
+#[cfg(target_family = "wasm")]
+type Condition = Arc<dyn Fn(&GraphState) -> bool>;
 
 /// Nodes (agents, swarms, graphs, functions) connected by edges.
 ///
@@ -133,7 +137,7 @@ impl GraphBuilder {
         mut self,
         from: impl Into<String>,
         to: impl Into<String>,
-        condition: impl Fn(&GraphState) -> bool + Send + Sync + 'static,
+        condition: impl Fn(&GraphState) -> bool + WasmCompatSend + WasmCompatSync + 'static,
     ) -> Self {
         self.edges
             .push((from.into(), to.into(), Some(Arc::new(condition))));
@@ -171,7 +175,7 @@ impl GraphBuilder {
     /// `DirStore`, a database), so a run that stopped resumes where it was.
     pub fn checkpoints(
         mut self,
-        store: impl rig_memory::AsyncStore + Send + Sync + 'static,
+        store: impl rig_memory::AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
     ) -> Self {
         self.checkpoints = Some(Checkpoints::new(store, "graph"));
         self
@@ -244,16 +248,25 @@ fn has_cycle(nodes: usize, edges: &[Edge]) -> bool {
     // once nothing points to it any more.
     let mut incoming = vec![0usize; nodes];
     for edge in edges {
-        incoming[edge.to] += 1;
+        if let Some(count) = incoming.get_mut(edge.to) {
+            *count += 1;
+        }
     }
-    let mut free: Vec<usize> = (0..nodes).filter(|&node| incoming[node] == 0).collect();
+    let mut free: Vec<usize> = incoming
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count == 0)
+        .map(|(node, _)| node)
+        .collect();
     let mut peeled = 0;
     while let Some(node) = free.pop() {
         peeled += 1;
         for edge in edges.iter().filter(|edge| edge.from == node) {
-            incoming[edge.to] -= 1;
-            if incoming[edge.to] == 0 {
-                free.push(edge.to);
+            if let Some(count) = incoming.get_mut(edge.to) {
+                *count -= 1;
+                if *count == 0 {
+                    free.push(edge.to);
+                }
             }
         }
     }
@@ -444,7 +457,8 @@ pub enum GraphFailure {
     #[error("checkpoint: {error}")]
     Checkpoint {
         /// What went wrong.
-        error: String,
+        #[source]
+        error: CheckpointError,
     },
     /// The run used up [`GraphBuilder::execution_timeout`] before its next batch.
     #[error("the graph ran out of time")]
@@ -496,7 +510,7 @@ impl Graph {
         &'a self,
         run_id: &'a str,
         task: impl Into<String>,
-    ) -> BoxStream<'a, GraphEvent> {
+    ) -> WasmBoxedStream<'a, GraphEvent> {
         self.stream_events(task.into(), Some(run_id))
     }
 
@@ -505,7 +519,7 @@ impl Graph {
     ///
     /// The run makes progress only while the stream is polled, and stops
     /// when the stream is dropped.
-    pub fn stream(&self, task: impl Into<String>) -> BoxStream<'_, GraphEvent> {
+    pub fn stream(&self, task: impl Into<String>) -> WasmBoxedStream<'_, GraphEvent> {
         self.stream_events(task.into(), None)
     }
 
@@ -513,7 +527,7 @@ impl Graph {
         &'a self,
         task: String,
         run_id: Option<&'a str>,
-    ) -> BoxStream<'a, GraphEvent> {
+    ) -> WasmBoxedStream<'a, GraphEvent> {
         events(
             move |sender| {
                 async move {
@@ -551,7 +565,7 @@ impl Graph {
         let checkpoints = saving
             .as_ref()
             .map(|saving| (saving.run_id.as_str(), &saving.checkpoints));
-        let fail = |error: String, state: GraphState, before: Duration| GraphError {
+        let fail = |error: CheckpointError, state: GraphState, before: Duration| GraphError {
             failures: vec![GraphFailure::Checkpoint { error }],
             run: GraphRun {
                 state,
@@ -610,8 +624,7 @@ impl Graph {
                 ] {
                     for id in ids {
                         let Some(index) = index_of(id) else {
-                            let error =
-                                format!("node {id:?} of the checkpoint is not in the graph");
+                            let error = CheckpointError::UnknownNode(id.clone());
                             return Err(fail(error, saved.state, before));
                         };
                         if !into.contains(&index) {
@@ -637,7 +650,8 @@ impl Graph {
         let names = |indices: &[usize]| -> Vec<String> {
             indices
                 .iter()
-                .map(|&index| inner.nodes[index].id.clone())
+                .filter_map(|&index| inner.nodes.get(index))
+                .map(|node| node.id.clone())
                 .collect()
         };
         let snapshot = |state: &GraphState,
@@ -693,8 +707,8 @@ impl Graph {
                 executions += ready.len();
                 let mut batch: FuturesUnordered<_> = ready
                     .iter()
-                    .map(|&index| {
-                        let node = &inner.nodes[index];
+                    .filter_map(|&index| Some((index, inner.nodes.get(index)?)))
+                    .map(|(index, node)| {
                         let input = self.input(index, &state);
                         // The node's n-th successful run: a failed run that
                         // runs again keeps the same part, journal included.
@@ -707,7 +721,7 @@ impl Graph {
                             let Some(emit) = emit else {
                                 let io = NodeIo::quiet(&node.id).saving_to(saving);
                                 let run = node.node.run(input, &io).instrument(span);
-                                return (index, clock.within(budget, run).await);
+                                return (index, node, clock.within(budget, run).await);
                             };
                             emit(GraphEvent::NodeStarted {
                                 node: node.id.clone(),
@@ -725,29 +739,29 @@ impl Graph {
                                 .saving_to(saving);
                             let run = node.node.run(input, &io).instrument(span);
                             let outcome = clock.within(budget, run).await;
-                            let node = node.id.clone();
+                            let id = node.id.clone();
                             emit(match &outcome {
                                 Some(Ok(output)) => GraphEvent::NodeFinished {
-                                    node,
+                                    node: id,
                                     output: output.text.clone(),
                                 },
                                 Some(Err(error)) => GraphEvent::NodeFailed {
-                                    node,
+                                    node: id,
                                     error: error.to_string(),
                                 },
                                 None => GraphEvent::NodeFailed {
-                                    node,
+                                    node: id,
                                     error: "did not finish in time".to_owned(),
                                 },
                             });
-                            (index, outcome)
+                            (index, node, outcome)
                         }
                     })
                     .collect();
                 let mut remaining = ready.clone();
-                while let Some((index, outcome)) = batch.next().await {
+                while let Some((index, node, outcome)) = batch.next().await {
                     remaining.retain(|&other| other != index);
-                    let id = inner.nodes[index].id.clone();
+                    let id = node.id.clone();
                     *state.runs.entry(id.clone()).or_default() += 1;
                     state.order.push(id.clone());
                     match outcome {
@@ -820,11 +834,17 @@ impl Graph {
     /// The input of node `index`: the task, and the outputs that lead to it.
     fn input(&self, index: usize, state: &GraphState) -> String {
         let inner = &*self.inner;
-        let mut sources: Vec<&str> = Vec::new();
+        let mut sources: Vec<(&str, &str)> = Vec::new();
         for edge in inner.edges.iter().filter(|edge| edge.to == index) {
-            let from = inner.nodes[edge.from].id.as_str();
-            if state.outputs.contains_key(from) && !sources.contains(&from) && edge.holds(state) {
-                sources.push(from);
+            let Some(from) = inner.nodes.get(edge.from) else {
+                continue;
+            };
+            let from = from.id.as_str();
+            if let Some(output) = state.outputs.get(from)
+                && !sources.iter().any(|(seen, _)| *seen == from)
+                && edge.holds(state)
+            {
+                sources.push((from, output));
             }
         }
         if sources.is_empty() {
@@ -834,8 +854,8 @@ impl Graph {
             "Original task: {}\n\nInputs from previous nodes:\n",
             state.task
         );
-        for from in sources {
-            let _ = write!(text, "\nFrom {from}:\n{}\n", state.outputs[from]);
+        for (from, output) in sources {
+            let _ = write!(text, "\nFrom {from}:\n{output}\n");
         }
         text.trim_end().to_owned()
     }
@@ -849,7 +869,7 @@ impl Node for Graph {
         &'a self,
         input: String,
         io: &'a NodeIo<'a>,
-    ) -> BoxFuture<'a, Result<NodeOutput, NodeError>> {
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
         Box::pin(async move {
             let saving = io.saving().map(|saving| {
                 let checkpoints = self.inner.checkpoints.clone();
