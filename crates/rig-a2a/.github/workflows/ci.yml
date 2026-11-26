@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, to catch new releases of Strands, the A2A SDKs and advisories.
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: fmt, clippy, test, doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install # the one rust-toolchain.toml names
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - run: cargo doc --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+  msrv:
+    name: MSRV (Rust 1.97.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo +1.97.1 check --all-targets
+
+  deny:
+    name: advisories and licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses
+
+  interop:
+    name: interop (Strands 1.66 / A2A v0.3, a2a-sdk 1.x / A2A v1.0)
+    runs-on: ubuntu-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --examples
+      - uses: astral-sh/setup-uv@v6
+      # Two environments: Strands 1.x pins a2a-sdk<0.4, the v1.0 check needs a2a-sdk 1.x.
+      - run: |
+          uv venv .venv-strands --python 3.12
+          uv pip install --python .venv-strands -r interop/requirements-strands.txt
+          uv venv .venv-a2a-v1 --python 3.12
+          uv pip install --python .venv-a2a-v1 -r interop/requirements-a2a-v1.txt
+      - run: interop/run.sh
+        env:
+          STRANDS_PY: .venv-strands/bin/python
+          A2A_V1_PY: .venv-a2a-v1/bin/python

@@ -1,0 +1,43 @@
+[package]
+name = "rig-a2a"
+version = "0.47.0"
+edition = "2024"
+rust-version = "1.97.1"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/pingedbrain/rig-a2a"
+keywords = ["rig", "a2a", "agents", "llm", "interoperability"]
+categories = ["network-programming", "web-programming::http-server"]
+# Not on crates.io until the Rig maintainers weigh in on the name (0xPlaygrounds/rig#391).
+publish = false
+description = "Serve Rig agents over the Agent2Agent (A2A) protocol and call remote A2A agents as Rig tools, built on the official A2A Rust SDK."
+
+# A2A serving is native-only: the SDK's server runs on tokio and axum.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rig-agent = { version = "0.47", default-features = false }
+rig-core = { version = "0.47", default-features = false }
+rig-memory = { version = "0.47", default-features = false }
+a2a = { package = "a2a-lf", version = "0.4" }
+a2a-server = { package = "a2a-server-lf", version = "0.5" }
+a2a-client = { package = "a2a-client-lf", version = "0.2" }
+serde = { version = "1", features = ["derive"] }
+schemars = "1"
+serde_json = "1"
+base64 = "0.22"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
+tokio = { version = "1", features = ["sync", "time"] }
+async-stream = "0.3"
+axum = "0.8"
+chrono = "0.4"
+futures = "0.3"
+thiserror = "2"
+tracing = "0.1"
+tower-http = { version = "0.6", features = ["limit"] }
+
+[dev-dependencies]
+rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
