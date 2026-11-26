@@ -178,6 +178,36 @@ while let Some(event) = events.next().await {
 
 A run waits in memory for its answers; resuming a run after a restart is not supported.
 
+## Resuming runs
+
+Give a swarm or graph a [rig-memory](https://crates.io/crates/rig-memory) store, and runs
+started with `run_as(run_id, task)` or `stream_as(run_id, task)` save their progress as
+they go. Calling it again with the same `run_id`, in the same process or after a
+restart, resumes the run where it stopped, or starts it if it finished or never ran.
+
+```rust
+let graph = Graph::builder()
+    .checkpoints(rig_memory::DirStore::open("runs")?) // or MemoryStore, rig-sqlite, rig-postgres...
+    // ...
+    .build()?;
+let run = graph.run_as("release-1.2", "Ship 1.2").await?;
+```
+
+- A swarm saves before every turn; a resumed run starts with the turn it was on,
+  keeping the handoffs, shared context and usage before it.
+- A graph saves before every batch and at the end; a resumed run starts with the
+  batch it was on, and a run that ended with failed nodes runs those nodes again (a
+  transient provider error, say) without redoing the rest.
+- A question waiting for a person survives: the resumed run asks it again, so the answer
+  can come from another process, hours later.
+- The time a run had counted carries over, so its timeouts still hold.
+- A streamed resumed run starts with a `Resumed` event.
+
+A turn or batch that was cut short runs again from its start, tools included, so tools
+with side effects should be safe to repeat. A nested swarm or graph node starts over
+when its batch runs again. A run id is 1-128 of `[A-Za-z0-9_-]`; each run is one JSON
+file, `rig-multiagent/{swarm,graph}/<run_id>.json`, written atomically.
+
 ## Tracing
 
 Runs are `swarm.run` / `graph.run` spans, with a `swarm.agent` or `graph.node` span per
@@ -191,7 +221,8 @@ the repetition check, batch execution, conditional edges, input from dependencie
 pruning of failed branches, and nesting. Differences: a handoff ends the agent's turn
 at once; a cyclic graph needs an execution bound; edge conditions are plain closures
 over the run state; a person is asked through a stream event rather than an interrupt
-that ends the run. Not here (yet): resuming a run from a snapshot, after a restart.
+that ends the run; checkpoints go to any rig-memory store, Strands' being its session
+managers.
 
 ## Testing
 
@@ -200,4 +231,6 @@ with no keys or network: handoffs, shared context, refused handoffs, every limit
 parallel branches (timed), joins, conditional edges, review loops, failures, timeouts,
 nesting and usage accounting; streamed runs on scripted streaming models, with event
 order, nested streaming and cancellation by dropping the stream; approval gates, agents
-asking, dismissed questions, and timeouts that stop while a person thinks.
+asking, dismissed questions, and timeouts that stop while a person thinks; resuming a
+swarm after a failed turn and after a restart, rerunning only a graph's failed node, a
+question answered by a later process, finished runs starting over, and bad run ids.

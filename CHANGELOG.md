@@ -18,5 +18,8 @@ First release.
 - A person in the loop: `Question` events in streamed runs; `human(question)` graph
   nodes; `SwarmBuilder::allow_questions` and the `ask_human` tool; `NodeIo::ask` for
   custom nodes. Time waiting for an answer does not count against timeouts.
+- Checkpoints in any rig-memory store (`checkpoints`): `run_as` / `stream_as` resume a
+  run after a failure or a restart, keeping its progress, its pending questions and its
+  counted time; `Resumed` events.
 - Token usage of every model call, stopped turns included; tracing spans per run and
   per turn or node.

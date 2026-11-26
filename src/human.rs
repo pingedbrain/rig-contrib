@@ -147,6 +147,8 @@ impl Node for HumanNode {
 pub(crate) struct Clock(Arc<Mutex<ClockState>>);
 
 struct ClockState {
+    /// Counted time from before a restart.
+    offset: Duration,
     started: Instant,
     paused_total: Duration,
     paused_since: Option<Instant>,
@@ -154,8 +156,10 @@ struct ClockState {
 }
 
 impl Clock {
-    pub(crate) fn start() -> Self {
+    /// A clock that has already counted `offset`, for a resumed run.
+    pub(crate) fn resumed(offset: Duration) -> Self {
         Self(Arc::new(Mutex::new(ClockState {
+            offset,
             started: Instant::now(),
             paused_total: Duration::ZERO,
             paused_since: None,
@@ -175,7 +179,7 @@ impl Clock {
             + state
                 .paused_since
                 .map_or(Duration::ZERO, |since| now - since);
-        (now - state.started).saturating_sub(paused)
+        state.offset + (now - state.started).saturating_sub(paused)
     }
 
     fn is_paused(&self) -> bool {

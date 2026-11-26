@@ -38,6 +38,7 @@
 // of model time; moving that on the error path costs nothing worth boxing for.
 #![allow(clippy::result_large_err)]
 
+mod checkpoint;
 mod events;
 mod graph;
 mod human;
@@ -47,6 +48,8 @@ mod swarm;
 pub use graph::{Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState};
 pub use human::{HumanNode, Question, human};
 pub use node::{FnNode, Node, NodeError, NodeIo, NodeOutput, node_fn};
+/// The stores runs keep their checkpoints in.
+pub use rig_memory;
 pub use swarm::{
     ASK_TOOL, HANDOFF_TOOL, Handoff, Swarm, SwarmBuilder, SwarmError, SwarmEvent, SwarmFailure,
     SwarmRun,

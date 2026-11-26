@@ -8,9 +8,11 @@ use std::time::{Duration, Instant};
 use futures::future::{BoxFuture, join_all};
 use futures::stream::BoxStream;
 use rig_core::completion::Usage;
+use serde::{Deserialize, Serialize};
 use tracing::Instrument;
 
 use crate::BuildError;
+use crate::checkpoint::Checkpoints;
 use crate::events::{Emit, events};
 use crate::human::{Clock, Question};
 use crate::node::{Node, NodeError, NodeIo, NodeOutput};
@@ -47,6 +49,7 @@ struct Inner {
     max_node_executions: Option<usize>,
     execution_timeout: Duration,
     node_timeout: Duration,
+    checkpoints: Option<Checkpoints>,
 }
 
 struct GraphNode {
@@ -77,6 +80,7 @@ pub struct GraphBuilder {
     max_node_executions: Option<usize>,
     execution_timeout: Duration,
     node_timeout: Duration,
+    checkpoints: Option<Checkpoints>,
 }
 
 impl Graph {
@@ -89,6 +93,7 @@ impl Graph {
             max_node_executions: None,
             execution_timeout: Duration::from_secs(15 * 60),
             node_timeout: Duration::from_secs(5 * 60),
+            checkpoints: None,
         }
     }
 }
@@ -159,6 +164,17 @@ impl GraphBuilder {
         self
     }
 
+    /// Keep the progress of runs started with [`run_as`](Graph::run_as) or
+    /// [`stream_as`](Graph::stream_as) in `store` (any rig-memory store: a
+    /// `DirStore`, a database), so a run that stopped resumes where it was.
+    pub fn checkpoints(
+        mut self,
+        store: impl rig_memory::AsyncStore + Send + Sync + 'static,
+    ) -> Self {
+        self.checkpoints = Some(Checkpoints::new(store, "graph"));
+        self
+    }
+
     /// Check the nodes and edges.
     pub fn build(self) -> Result<Graph, BuildError> {
         if self.nodes.is_empty() {
@@ -214,6 +230,7 @@ impl GraphBuilder {
                 max_node_executions: self.max_node_executions,
                 execution_timeout: self.execution_timeout,
                 node_timeout: self.node_timeout,
+                checkpoints: self.checkpoints,
             }),
         })
     }
@@ -242,7 +259,7 @@ fn has_cycle(nodes: usize, edges: &[Edge]) -> bool {
 }
 
 /// A run so far, as edge conditions see it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphState {
     task: String,
     outputs: HashMap<String, String>,
@@ -336,6 +353,12 @@ impl std::fmt::Display for GraphError {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum GraphEvent {
+    /// The run resumed from its checkpoint: the first event of a resumed
+    /// [`stream_as`](Graph::stream_as) run.
+    Resumed {
+        /// The nodes that had run, in order.
+        done: Vec<String>,
+    },
     /// A node started.
     NodeStarted {
         /// The node.
@@ -370,6 +393,26 @@ pub enum GraphEvent {
     Finished(Box<Result<GraphRun, GraphError>>),
 }
 
+/// A run's checkpoint: what it did, and the batch that comes next.
+#[derive(Serialize, Deserialize)]
+struct Saved {
+    finished: bool,
+    state: GraphState,
+    usage: Usage,
+    last: Vec<String>,
+    executions: usize,
+    /// The next batch.
+    ready: Vec<String>,
+    /// Nodes that failed, to run again.
+    failed: Vec<String>,
+    active_ms: u64,
+    elapsed_ms: u64,
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// Something that went wrong in a graph run.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -389,6 +432,12 @@ pub enum GraphFailure {
         /// The node.
         node: String,
     },
+    /// The checkpoint could not be read or written.
+    #[error("checkpoint: {error}")]
+    Checkpoint {
+        /// What went wrong.
+        error: String,
+    },
     /// The run used up [`GraphBuilder::execution_timeout`] before its next batch.
     #[error("the graph ran out of time")]
     Timeout,
@@ -404,7 +453,40 @@ impl Graph {
     /// Run the graph on `task`.
     pub async fn run(&self, task: impl Into<String>) -> Result<GraphRun, GraphError> {
         let span = tracing::info_span!("graph.run");
-        self.run_task(task.into(), None).instrument(span).await
+        self.run_task(task.into(), None, None)
+            .instrument(span)
+            .await
+    }
+
+    /// Run the graph as run `run_id`: resume it from its last checkpoint if
+    /// it has one and did not finish, or else start it on `task`. Progress
+    /// is saved before every batch and at the end, so a run that stopped
+    /// carries on with the batch it was on, and a run that ended with failed
+    /// nodes runs those nodes again.
+    ///
+    /// Needs [`checkpoints`](GraphBuilder::checkpoints); without them it is
+    /// [`run`](Self::run). A `run_id` is 1-128 of `[A-Za-z0-9_-]`. A node that
+    /// is a swarm or graph starts over when its batch runs again.
+    pub async fn run_as(
+        &self,
+        run_id: &str,
+        task: impl Into<String>,
+    ) -> Result<GraphRun, GraphError> {
+        let span = tracing::info_span!("graph.run", graph.run_id = %run_id);
+        self.run_task(task.into(), Some(run_id), None)
+            .instrument(span)
+            .await
+    }
+
+    /// [`stream`](Self::stream) as run `run_id`, resuming it as
+    /// [`run_as`](Self::run_as) does. A resumed run starts with
+    /// [`GraphEvent::Resumed`].
+    pub fn stream_as<'a>(
+        &'a self,
+        run_id: &'a str,
+        task: impl Into<String>,
+    ) -> BoxStream<'a, GraphEvent> {
+        self.stream_events(task.into(), Some(run_id))
     }
 
     /// Run the graph on `task`, reporting each node as it starts, writes and
@@ -413,14 +495,21 @@ impl Graph {
     /// The run makes progress only while the stream is polled, and stops
     /// when the stream is dropped.
     pub fn stream(&self, task: impl Into<String>) -> BoxStream<'_, GraphEvent> {
-        let task = task.into();
+        self.stream_events(task.into(), None)
+    }
+
+    fn stream_events<'a>(
+        &'a self,
+        task: String,
+        run_id: Option<&'a str>,
+    ) -> BoxStream<'a, GraphEvent> {
         events(
             move |sender| {
                 async move {
                     let emit = move |event| {
                         let _ = sender.send(event);
                     };
-                    self.run_task(task, Some(&emit)).await
+                    self.run_task(task, run_id, Some(&emit)).await
                 }
                 .instrument(tracing::info_span!("graph.run"))
             },
@@ -431,22 +520,112 @@ impl Graph {
     async fn run_task(
         &self,
         task: String,
+        run_id: Option<&str>,
         emit: Option<Emit<'_, GraphEvent>>,
     ) -> Result<GraphRun, GraphError> {
         let inner = &*self.inner;
         let started = Instant::now();
-        let clock = Clock::start();
-        let clock = &clock;
-        let mut state = GraphState {
-            task,
-            ..GraphState::default()
+        let checkpoints = run_id.zip(inner.checkpoints.as_ref());
+        let fail = |error: String, state: GraphState, before: Duration| GraphError {
+            failures: vec![GraphFailure::Checkpoint { error }],
+            run: GraphRun {
+                state,
+                last: Vec::new(),
+                usage: Usage::default(),
+                elapsed: before + started.elapsed(),
+            },
         };
-        let mut usage = Usage::default();
+        let saved = match checkpoints {
+            Some((id, checkpoints)) => match checkpoints.load::<Saved>(id).await {
+                Ok(saved) => saved.filter(|saved| !saved.finished),
+                Err(error) => return Err(fail(error, GraphState::default(), Duration::ZERO)),
+            },
+            None => None,
+        };
+        let (mut state, mut usage, mut last, mut executions, mut ready, clock, before) = match saved
+        {
+            None => (
+                GraphState {
+                    task,
+                    ..GraphState::default()
+                },
+                Usage::default(),
+                Vec::new(),
+                0,
+                inner.entries.clone(),
+                Clock::resumed(Duration::ZERO),
+                Duration::ZERO,
+            ),
+            Some(saved) => {
+                let before = Duration::from_millis(saved.elapsed_ms);
+                // The batch it was on, and the nodes that failed, run again.
+                let mut ready = Vec::new();
+                for id in saved.ready.iter().chain(&saved.failed) {
+                    let Some(index) = inner.nodes.iter().position(|node| &node.id == id) else {
+                        let error = format!("node {id:?} of the checkpoint is not in the graph");
+                        return Err(fail(error, saved.state, before));
+                    };
+                    if !ready.contains(&index) {
+                        ready.push(index);
+                    }
+                }
+                tracing::info!(done = saved.state.order.len(), "graph run resumed");
+                if let Some(emit) = emit {
+                    emit(GraphEvent::Resumed {
+                        done: saved.state.order.clone(),
+                    });
+                }
+                let clock = Clock::resumed(Duration::from_millis(saved.active_ms));
+                (
+                    saved.state,
+                    saved.usage,
+                    saved.last,
+                    saved.executions,
+                    ready,
+                    clock,
+                    before,
+                )
+            }
+        };
+        let clock = &clock;
         let mut failures = Vec::new();
-        let mut last = Vec::new();
-        let mut executions = 0;
-        let mut ready = inner.entries.clone();
+        let snapshot = |state: &GraphState,
+                        usage: &Usage,
+                        last: &[String],
+                        executions: usize,
+                        ready: &[usize],
+                        failures: &[GraphFailure]| Saved {
+            finished: ready.is_empty() && failures.is_empty(),
+            state: state.clone(),
+            usage: *usage,
+            last: last.to_vec(),
+            executions,
+            ready: ready
+                .iter()
+                .map(|&index| inner.nodes[index].id.clone())
+                .collect(),
+            failed: failures
+                .iter()
+                .filter_map(|failure| match failure {
+                    GraphFailure::Node { node, .. } | GraphFailure::NodeTimeout { node } => {
+                        Some(node.clone())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            active_ms: millis(clock.active()),
+            elapsed_ms: millis(before + started.elapsed()),
+        };
         while !ready.is_empty() {
+            // ponytail: one checkpoint per batch, so a batch cut short runs
+            // again whole; save as each node finishes if batches get costly.
+            if let Some((id, checkpoints)) = checkpoints {
+                let saved = snapshot(&state, &usage, &last, executions, &ready, &failures);
+                if let Err(error) = checkpoints.save(id, &saved).await {
+                    failures.push(GraphFailure::Checkpoint { error });
+                    break;
+                }
+            }
             if let Some(limit) = inner.max_node_executions
                 && executions + ready.len() > limit
             {
@@ -536,11 +715,22 @@ impl Graph {
                 }
             }
         }
+        if let Some((id, checkpoints)) = checkpoints
+            && !failures
+                .iter()
+                .any(|failure| matches!(failure, GraphFailure::Checkpoint { .. }))
+        {
+            // Finished, or the failed nodes to run again next time.
+            let saved = snapshot(&state, &usage, &last, executions, &[], &failures);
+            if let Err(error) = checkpoints.save(id, &saved).await {
+                tracing::warn!(%error, "could not save the graph run's end");
+            }
+        }
         let run = GraphRun {
             state,
             last,
             usage,
-            elapsed: started.elapsed(),
+            elapsed: before + started.elapsed(),
         };
         if failures.is_empty() {
             Ok(run)
@@ -593,7 +783,7 @@ impl Node for Graph {
                 GraphEvent::Question(question) => io.forward(question),
                 _ => {}
             };
-            let run = self.run_task(input, Some(&emit)).await?;
+            let run = self.run_task(input, None, Some(&emit)).await?;
             Ok(NodeOutput::new(run.answer()).with_usage(run.usage))
         })
     }
