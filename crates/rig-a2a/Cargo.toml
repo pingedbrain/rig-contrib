@@ -9,7 +9,6 @@ repository.workspace = true
 keywords = ["rig", "a2a", "agents", "llm", "interoperability"]
 categories = ["network-programming", "web-programming::http-server"]
 # Not on crates.io until the Rig maintainers weigh in on the name (0xPlaygrounds/rig#391).
-publish = false
 description = "Serve Rig agents over the Agent2Agent (A2A) protocol and call remote A2A agents as Rig tools, built on the official A2A Rust SDK."
 
 # A2A serving is native-only: the SDK's server runs on tokio and axum.
