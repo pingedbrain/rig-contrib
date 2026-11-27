@@ -15,7 +15,7 @@ categories = ["development-tools::testing"]
 multiagent = ["dep:rig-multiagent"]
 # Targets and evaluators on AWS Bedrock AgentCore: invoke a deployed runtime,
 # read its spans from CloudWatch Logs, score them with AgentCore Evaluations.
-agentcore = ["dep:aws-config", "dep:aws-sdk-bedrockagentcore", "dep:aws-sdk-cloudwatchlogs", "dep:aws-smithy-types", "dep:tokio", "dep:uuid"]
+agentcore = ["dep:aws-config", "dep:aws-sdk-bedrockagentcore", "dep:aws-sdk-cloudwatchlogs", "dep:aws-smithy-types", "dep:uuid"]
 
 [dependencies]
 aws-config = { version = "1", default-features = false, features = ["rustls", "rt-tokio", "credentials-process", "sso"], optional = true }
@@ -31,7 +31,7 @@ schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.54.1", features = ["time", "sync"], optional = true }
+tokio = { version = "1.54.1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"], optional = true }
 
