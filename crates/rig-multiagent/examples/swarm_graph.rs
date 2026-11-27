@@ -18,8 +18,9 @@
 //! ```
 //!
 //! Live mode is chosen by `OPENROUTER_MODEL` or `RIG_MODEL`, not by the key
-//! alone, so a key in the environment does not start paid calls by accident. The scripted
-//! answers come from Rig's mock models, as the crate's tests use them; in live
+//! alone, so a key in the environment does not start paid calls by accident.
+//! The scripted answers come from Rig's mock models, as the crate's tests use
+//! them; in live
 //! mode the model decides what each agent says, so only the scripted run
 //! checks the join. A live model may also keep handing off instead of
 //! answering, so a live run can stop at `max_handoffs` with an error.
@@ -49,17 +50,14 @@ enum Backend {
 
 impl Backend {
     fn from_env() -> Result<Self> {
+        // RIG_MODEL=opencode-go/<model> picks OpenCode Go; any other value
+        // is ignored here and OPENROUTER_MODEL decides, as before.
         if let Ok(model) = std::env::var("RIG_MODEL")
-            && !model.is_empty()
+            && let Some(name) = model.strip_prefix("opencode-go/")
         {
-            // Only OpenCode Go is wired here; anything else must not fall
-            // through to OpenRouter.
-            let Some(name) = model
-                .strip_prefix("opencode-go/")
-                .filter(|name| !name.is_empty())
-            else {
-                return Err(format!("RIG_MODEL must be opencode-go/<model>, got {model:?}").into());
-            };
+            if name.is_empty() {
+                return Err("RIG_MODEL is opencode-go/ with no model name".into());
+            }
             let key = std::env::var("OPENCODE_GO_API_KEY")
                 .or_else(|_| std::env::var("OPENCODE_API_KEY"))?;
             return Ok(Self::Live {

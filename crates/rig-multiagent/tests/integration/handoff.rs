@@ -167,12 +167,11 @@ async fn large_work_is_bounded_and_keeps_the_newest() {
     let mut left = Vec::new();
     let mut right = Vec::new();
     for turn in 0..TURNS {
-        let (me, other, name) = if turn % 2 == 0 {
-            (&mut left, "right", "left")
+        let (me, other) = if turn % 2 == 0 {
+            (&mut left, "right")
         } else {
-            (&mut right, "left", "right")
+            (&mut right, "left")
         };
-        let _ = name;
         me.push(MockTurn::tool_call(
             format!("big-{turn}"),
             "big",

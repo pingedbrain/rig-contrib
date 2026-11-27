@@ -936,9 +936,15 @@ fn bounded_line(line: String) -> String {
 /// Drops the oldest lines of one turn's work until it fits the total budget.
 fn trim_oldest(work: &mut Vec<String>) {
     let mut total: usize = work.iter().map(String::len).sum();
-    while total > WORK_TOTAL_BYTES && !work.is_empty() {
-        total -= work.remove(0).len();
-    }
+    let dropped = work
+        .iter()
+        .take_while(|line| {
+            let over = total > WORK_TOTAL_BYTES;
+            total = total.saturating_sub(line.len());
+            over
+        })
+        .count();
+    work.drain(..dropped);
 }
 
 /// Drops the oldest lines of the run's work, across agents, until it fits the
