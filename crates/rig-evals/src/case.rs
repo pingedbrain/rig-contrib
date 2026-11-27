@@ -1,6 +1,7 @@
 //! Cases and datasets: what an experiment runs, and what each run is checked
 //! against.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -211,38 +212,125 @@ impl Dataset {
     }
 
     /// Parse a JSON array of cases.
+    ///
+    /// A case id that repeats is logged as a warning; the experiment refuses
+    /// to run such a dataset (see [`ExperimentError::DuplicateCase`](crate::ExperimentError::DuplicateCase)).
+    /// For errors that name the element's index, see [`Dataset::load_named`].
     pub fn from_json(text: &str) -> Result<Self, DatasetError> {
-        Ok(serde_json::from_str(text)?)
+        let cases: Vec<Case> = serde_json::from_str(text)?;
+        let places: Vec<String> = (0..cases.len()).map(|i| format!("index {i}")).collect();
+        warn_repeated_ids(&cases, &places);
+        Ok(Self { cases })
     }
 
-    /// Parse JSON Lines: one case per line, blank lines skipped.
+    /// Parse JSON Lines: one case per line, blank lines skipped. A bad line
+    /// is a [`DatasetError::Line`] naming its line number (from 1).
+    ///
+    /// A repeated case id is logged as a warning, as in [`Dataset::from_json`].
     pub fn from_jsonl(text: &str) -> Result<Self, DatasetError> {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.trim().is_empty())
-            .map(|(index, line)| {
-                serde_json::from_str(line).map_err(|source| DatasetError::Line {
-                    line: index + 1,
-                    source,
-                })
-            })
-            .collect()
+        let mut cases = Vec::new();
+        let mut places = Vec::new();
+        for (index, line) in text.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let case = serde_json::from_str(line).map_err(|source| DatasetError::Line {
+                line: index + 1,
+                source,
+            })?;
+            cases.push(case);
+            places.push(format!("line {}", index + 1));
+        }
+        warn_repeated_ids(&cases, &places);
+        Ok(Self { cases })
     }
 
     /// Read a file: `.json` as a JSON array, `.jsonl` or `.ndjson` as JSON
-    /// Lines.
+    /// Lines. Errors are the same as [`Dataset::load_named`] without the
+    /// path and index.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, DatasetError> {
         let path = path.as_ref();
-        let read = || {
-            std::fs::read_to_string(path).map_err(|source| DatasetError::Read {
-                path: path.to_owned(),
-                source,
-            })
+        let parse: fn(&str) -> Result<Self, DatasetError> =
+            match path.extension().and_then(|extension| extension.to_str()) {
+                Some("json") => Self::from_json,
+                Some("jsonl" | "ndjson") => Self::from_jsonl,
+                _ => return Err(DatasetError::UnknownFormat(path.to_owned())),
+            };
+        let text = std::fs::read_to_string(path).map_err(|source| DatasetError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        parse(&text)
+    }
+
+    /// Read a file like [`Dataset::load`], but with errors that say where
+    /// they are: a parse error is [`DatasetError::InFile`], which names the
+    /// path and wraps the inner error. Inside it, a bad JSON Lines line is
+    /// `Line` (its line number, from 1) and a bad JSON array element is
+    /// [`DatasetError::Element`] (its index, from 0).
+    ///
+    /// ```no_run
+    /// # fn main() -> Result<(), rig_evals::DatasetError> {
+    /// let dataset = rig_evals::Dataset::load_named("cases.jsonl")?;
+    /// # let _ = dataset;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn load_named(path: impl AsRef<Path>) -> Result<Self, DatasetError> {
+        let path = path.as_ref();
+        let json = match path.extension().and_then(|extension| extension.to_str()) {
+            Some("json") => true,
+            Some("jsonl" | "ndjson") => false,
+            _ => return Err(DatasetError::UnknownFormat(path.to_owned())),
         };
-        match path.extension().and_then(|extension| extension.to_str()) {
-            Some("json") => Self::from_json(&read()?),
-            Some("jsonl" | "ndjson") => Self::from_jsonl(&read()?),
-            _ => Err(DatasetError::UnknownFormat(path.to_owned())),
+        let text = std::fs::read_to_string(path).map_err(|source| DatasetError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        let parsed = if json {
+            parse_json_elements(&text)
+        } else {
+            Self::from_jsonl(&text)
+        };
+        parsed.map_err(|source| DatasetError::InFile {
+            path: path.to_owned(),
+            source: Box::new(source),
+        })
+    }
+}
+
+/// Parse a JSON array one element at a time, so an element that is not a
+/// case is a [`DatasetError::Element`] with its index.
+fn parse_json_elements(text: &str) -> Result<Dataset, DatasetError> {
+    let elements: Vec<Value> = serde_json::from_str(text)?;
+    let cases = elements
+        .into_iter()
+        .enumerate()
+        .map(|(index, element)| {
+            serde_json::from_value(element)
+                .map_err(|source| DatasetError::Element { index, source })
+        })
+        .collect::<Result<Vec<Case>, _>>()?;
+    let places: Vec<String> = (0..cases.len()).map(|i| format!("index {i}")).collect();
+    warn_repeated_ids(&cases, &places);
+    Ok(Dataset { cases })
+}
+
+/// Log a warning for each case whose id an earlier case already has. `places`
+/// names where each case came from, in the same order as `cases`.
+fn warn_repeated_ids(cases: &[Case], places: &[String]) {
+    let mut first_seen: HashMap<&str, &str> = HashMap::new();
+    for (case, place) in cases.iter().zip(places) {
+        match first_seen.get(case.id.as_str()) {
+            Some(first) => tracing::warn!(
+                id = %case.id,
+                first = %first,
+                second = %place,
+                "dataset repeats a case id; an experiment will refuse to run it"
+            ),
+            None => {
+                first_seen.insert(case.id.as_str(), place.as_str());
+            }
         }
     }
 }
@@ -285,4 +373,23 @@ pub enum DatasetError {
     /// The file's extension is not `.json`, `.jsonl` or `.ndjson`.
     #[error("{0}: expected a .json, .jsonl or .ndjson file")]
     UnknownFormat(PathBuf),
+    /// A JSON array element is not a case, from [`Dataset::load_named`]. `index`
+    /// counts from 0.
+    #[error("invalid case at index {index}: {source}")]
+    Element {
+        /// The element's position in the array, from 0.
+        index: usize,
+        /// The parse error.
+        source: serde_json::Error,
+    },
+    /// A file's contents do not parse, from [`Dataset::load_named`]. The inner
+    /// error (`Json`, `Line` or `Element`) says what is wrong; this names the
+    /// file.
+    #[error("{path}: {source}")]
+    InFile {
+        /// The file.
+        path: PathBuf,
+        /// The parse error.
+        source: Box<DatasetError>,
+    },
 }

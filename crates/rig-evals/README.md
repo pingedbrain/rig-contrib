@@ -31,7 +31,11 @@ async fn support_bot(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::erro
 A case has an `id`, an `input`, and the references evaluators check a run against: an
 `expected` answer, an expected `trajectory` of tool calls, and `assertions` in plain
 language. These are the reference inputs of AWS Bedrock AgentCore evaluations and the
-fields of Strands Evals' cases. `Dataset::load` reads `.json` (an array) or `.jsonl`.
+fields of Strands Evals' cases. `Dataset::load` reads `.json` (an array) or `.jsonl`; `Dataset::load_named` reads the same
+files and names the path and line or index of a bad case in its error.
+
+Case ids are unique within a dataset. Loading a dataset that repeats an id logs a warning
+naming both places; `Experiment::run` then refuses the dataset with `DuplicateCase`.
 
 ```json
 {"id": "refund", "input": "Order 7 arrived broken.", "expected": "A refund was issued.",
