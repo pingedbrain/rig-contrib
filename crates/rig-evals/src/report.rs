@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{Score, ToolCall, Turn};
 
+mod compare;
+
+pub use compare::{CaseChange, Comparison, EvaluatorDelta};
+
 /// One run of the target on a case.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

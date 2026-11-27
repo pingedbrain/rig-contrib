@@ -13,6 +13,7 @@
 
 #[cfg(feature = "agentcore")]
 mod agentcore;
+mod compare;
 mod dataset;
 mod evaluators;
 mod experiment;
