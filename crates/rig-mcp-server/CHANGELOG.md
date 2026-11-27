@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- Docs: the settings table in the README lists `max_request_bytes` (4 MiB, HTTP 413, Streamable HTTP only).
+
 ## 0.47.4 (2026-11-27)
 
 - Logs no longer print the Rig error text. A failed agent call, a failed typed call, and a failed session load or save log a short `kind` and a fixed reason, never the error text, because the text can carry provider output or prompt content. No public API or behavior changed.
