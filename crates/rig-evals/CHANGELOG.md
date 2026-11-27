@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Not applicable: `Score::not_applicable` marks a score the evaluator could not apply (N/A). It is
+  left out of pass rates and means, shown as N/A in Markdown, as `not_applicable` in JSON and as a
+  skipped test case in JUnit. `Equals::not_applicable_without_reference()` and
+  `Trajectory::not_applicable_without_reference()` opt in to it for cases lacking the reference.
+  The default is unchanged: such a case still fails with `MissingReference`.
+- Judge tokens: an `LlmJudge` records its usage on its score (`Score::usage`). The report's `tokens`
+  now include the judges' tokens (a change to the totals of reports with a judge), and
+  `Report::judge_tokens` gives the judges' share.
+- A judge reply cut at `max_tokens` fails with `EvalError::JudgeTruncated`, which says so.
 Versions follow Rig's: rig-evals 0.47.x works with Rig 0.47.
 
 ## 0.47.2 (2026-11-26)

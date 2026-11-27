@@ -1,8 +1,11 @@
 //! A model as the evaluator.
 
 use std::fmt::Write as _;
+use std::sync::{Arc, OnceLock};
 
 use rig_agent::Agent;
+use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
+use rig_core::completion::FinishReason;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -79,6 +82,23 @@ impl LlmJudge {
     }
 }
 
+/// Notes the token cap of a judge turn that stopped at the cap, so the
+/// failed judgment can say so.
+struct LengthWatch(Arc<OnceLock<Option<u64>>>);
+
+impl AgentHook for LengthWatch {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        if matches!(event.finish_reason, Some(FinishReason::Length)) {
+            let _ = self.0.set(event.max_tokens);
+        }
+        ModelTurnAction::Continue
+    }
+}
+
 impl Evaluator for LlmJudge {
     fn name(&self) -> &str {
         "llm_judge"
@@ -92,12 +112,29 @@ impl Evaluator for LlmJudge {
         if let Some(failed) = target_failed(self.name(), trial) {
             return ready(Ok(failed));
         }
-        let verdict = self.agent.prompt_typed::<Verdict>(self.prompt(case, trial));
+        let cut_off = Arc::new(OnceLock::new());
+        let run = self
+            .agent
+            .prompt_typed::<Verdict>(self.prompt(case, trial))
+            .add_hook(LengthWatch(Arc::clone(&cut_off)));
         Box::pin(async move {
-            let verdict = verdict.await?.output;
+            let response = match run.await {
+                Ok(response) => response,
+                Err(error) => {
+                    return Err(match cut_off.get() {
+                        Some(max_tokens) => EvalError::JudgeTruncated {
+                            max_tokens: *max_tokens,
+                        },
+                        None => EvalError::Judge(error),
+                    });
+                }
+            };
+            let verdict = response.output;
             let score = Score::new(self.name(), verdict.score, false);
             let passed = score.value >= self.threshold;
-            Ok(Score { passed, ..score }.with_explanation(verdict.reasoning))
+            Ok(Score { passed, ..score }
+                .with_explanation(verdict.reasoning)
+                .with_usage(response.usage))
         })
     }
 }
