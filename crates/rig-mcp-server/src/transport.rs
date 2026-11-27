@@ -44,7 +44,7 @@ impl McpServer {
     ///
     /// # Errors
     ///
-    /// A [`BuildError`] when two tools share a name, or the transport's error.
+    /// A [`BuildError`] when two tools, resources or prompts clash, or the transport's error.
     pub async fn serve_stdio(self) -> Result<(), ServeError> {
         let running = Handler::new(self)?.serve(rmcp::transport::stdio()).await?;
         running.waiting().await?;
@@ -56,7 +56,7 @@ impl McpServer {
     ///
     /// # Errors
     ///
-    /// A [`BuildError`] when two tools share a name, or the transport's error.
+    /// A [`BuildError`] when two tools, resources or prompts clash, or the transport's error.
     pub async fn serve<T, E, A>(self, transport: T) -> Result<(), ServeError>
     where
         T: rmcp::transport::IntoTransport<rmcp::RoleServer, E, A>,
