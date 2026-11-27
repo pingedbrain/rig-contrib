@@ -343,6 +343,14 @@ impl std::fmt::Debug for RunState {
     }
 }
 
+// `RunState` is read-only after construction: `with` consumes it and nothing
+// mutates the map once a run holds it. Observing it after a caught panic
+// therefore cannot see a broken invariant. The trait objects it stores are not
+// `RefUnwindSafe`, which would otherwise make `GraphState` and `GraphRun` lose
+// the auto traits they had before this type existed.
+impl std::panic::UnwindSafe for RunState {}
+impl std::panic::RefUnwindSafe for RunState {}
+
 /// A run so far, as edge conditions see it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphState {
