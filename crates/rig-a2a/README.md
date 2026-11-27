@@ -97,6 +97,10 @@ finishes (a refused call, a dropped connection) is an error, never an empty answ
 Both ways agents stream are understood: artifact chunks (Rig, most SDKs) and
 `working` status messages followed by a final artifact (Strands).
 
+A second client can attach to a running task with `tasks/resubscribe`
+(`A2AClient::subscribe_to_task`). It gets the task's updates from then on, and the
+stream ends when the task does.
+
 ## Serving: what comes back
 
 A plain agent answers with text, streamed, plus any image the model produced as a
@@ -186,6 +190,65 @@ async fn bounded(agent: Agent, url: &str, token: &str) -> Result<(), Box<dyn std
 }
 ```
 
+## Push notifications
+
+Off by default: the card says `pushNotifications: false`, and a config set is refused
+with `PushNotificationNotSupported`. Turn them on with `push_notifications(true)`, and
+set a `bearer_token` too: without one, push stays off and the server logs an error. A
+client then sets a webhook for a task, on the send or with `tasks/pushNotificationConfig/set`,
+and the server POSTs each task update to it.
+
+```rust
+use rig_a2a::A2aServer;
+use rig_agent::Agent;
+
+/// Serve an agent with push notifications, for webhooks on one allowlisted host.
+fn serve_with_push(agent: Agent, token: &str) -> A2aServer {
+    A2aServer::new(agent, "https://agent.example.com")
+        .bearer_token(token)
+        .push_notifications(true)
+        .push_allowed_hosts(["hooks.example.com"])
+        .terminal_task_limit(1_000)
+}
+```
+
+**Risks.** A webhook URL comes from the client, so it is a server-side request forgery
+(SSRF) risk, and the webhook receives task content. Read these before turning push on:
+
+- **Webhook URLs are client input.** With no allowlist, any host the address guard allows
+  can receive POSTs. Set `push_allowed_hosts` when clients are not trusted.
+- **Receivers must authenticate.** The server signs nothing (no JWT or JWKS). It sends the
+  client's `token` as `A2A-Notification-Token` and the client's `authentication`
+  credentials as `Authorization`. A receiver must check both itself.
+- **Updates carry full content.** Each POST has the whole task update, including the
+  agent's output and artifacts.
+- **Task ids are secrets.** Anyone who holds a task id can attach a webhook to it and get
+  its updates. That is why push needs the bearer token; the token is the only check on
+  who may attach one.
+- **Slow webhooks slow tasks.** Delivery runs in the task's event loop, one config at a
+  time, with a 5 second timeout per POST. A task with 10 stalled configs can take 50
+  seconds per update, and the client's stream waits for it.
+- **Configs outlive tasks.** A task holds up to 10 configs, and the server up to 10,000
+  counted since it started. A finished task keeps its configs until the total is reached;
+  then the configs of tasks purged by `terminal_task_limit` are dropped, so set it as above.
+
+Saving a config checks its URL: it must be `https` (`http` only with
+`allow_unguarded_push_urls()`), on the allowlist if one is set, and not a literal IP in
+100.64.0.0/10, 64:ff9b::/96, 2002::/16 or ::a.b.c.d/96.
+
+When a webhook is called, the SDK refuses these, including names that resolve to them and
+redirects to them: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16,
+224.0.0.0/4, 0.0.0.0, ::1, ::, fc00::/7, fe80::/10, ff00::/8, their IPv4-mapped forms, and
+the hosts `localhost`, `metadata.google.internal` and `metadata.azure.com`. Names that
+resolve into the literal-check ranges above are not refused at delivery.
+
+`allow_unguarded_push_urls()` drops the `https` requirement, the save-time refusal of the
+literal ranges above, and the SDK's address guard, and lets the SDK use the proxies named
+in the environment. Use it for tests against a
+webhook on this machine only. `push_config_store` keeps configs in your own store, and
+the same checks and caps apply to it. The v0.3 card under `/v03` keeps
+`pushNotifications: false`.
+
 ## Tracing
 
 Each task runs in an `a2a.task` span (`a2a.task_id`, `a2a.context_id`, and `a2a.state`
@@ -221,7 +284,7 @@ default, as in Rig. Set it on the agent you serve with
 
 ## Not supported
 
-Push notifications (webhooks), the authenticated extended agent card, OAuth/OIDC
+The authenticated extended agent card, OAuth/OIDC
 schemes (bearer only; add your own Axum middleware for more), the gRPC binding, and
 files produced by tools (only the model's own images become file parts).
 
