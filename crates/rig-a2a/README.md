@@ -144,6 +144,11 @@ Every task spends model tokens, so an exposed agent is bounded by default:
 | `max_request_bytes` | 2 MiB | HTTP 413 |
 | `bearer_token` | none | HTTP 401 on every call (cards stay public) |
 
+Finished tasks are a different case: the default store keeps them all, so memory grows with
+every task. Set `terminal_task_limit` to purge the oldest finished tasks. A purged task
+answers `GetTask` with `TaskNotFound`. Running tasks are never purged. It is off by default
+because a client may fetch a finished task long after it ended.
+
 ```rust
 use std::time::Duration;
 use rig_a2a::{A2aServer, RemoteAgent};
@@ -154,6 +159,7 @@ async fn bounded(agent: Agent, url: &str, token: &str) -> Result<(), Box<dyn std
         .bearer_token(token)
         .max_concurrent_tasks(8)
         .max_run_duration(Duration::from_secs(120))
+        .terminal_task_limit(1_000)
         .into_router();
 
     let _remote = RemoteAgent::builder(url)

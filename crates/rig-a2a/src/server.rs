@@ -53,7 +53,9 @@ impl A2aServer {
     ///
     /// The card takes the agent's name and description, lists both bindings
     /// under `url`, accepts `text/plain` and `application/json` parts, and
-    /// declares one `chat` skill. Tasks live in an [`InMemoryTaskStore`].
+    /// declares one `chat` skill. Tasks live in an [`InMemoryTaskStore`],
+    /// which keeps finished tasks without limit unless
+    /// [`terminal_task_limit`](Self::terminal_task_limit) is set.
     pub fn new(agent: Agent, url: impl AsRef<str>) -> Self {
         let url = url.as_ref().trim_end_matches('/').to_owned();
         Self {
@@ -64,6 +66,30 @@ impl A2aServer {
             bearer: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
         }
+    }
+
+    /// Keep at most `max` finished tasks in memory, purging the oldest
+    /// first. A purged task answers `GetTask` with `TaskNotFound`. Tasks
+    /// still running are never purged. A `max` of 0 is treated as 1.
+    ///
+    /// Off by default: a client may fetch a finished task long after it ended,
+    /// and a limit would change that answer. Set it for a server that runs
+    /// for long and takes many tasks.
+    ///
+    /// Caveats:
+    /// - A late status update for a purged task can bring it back. The
+    ///   executor's save path falls back to `create` when `update` finds no
+    ///   task (in `a2a-server-lf`, not in this crate), so a cancel or event
+    ///   that arrives after the purge re-creates the task as a finished one,
+    ///   where it can be purged again. Set the limit well above the number of
+    ///   tasks in flight.
+    /// - Only the default in-memory store has this limit. Call it before
+    ///   [`task_store`](Self::task_store) or the limit is dropped; for a
+    ///   custom store, set its own limit instead.
+    #[must_use]
+    pub fn terminal_task_limit(mut self, max: usize) -> Self {
+        self.store = InMemoryTaskStore::new().with_terminal_task_limit(max.max(1));
+        self
     }
 }
 
@@ -171,6 +197,11 @@ impl<S: TaskStore> A2aServer<S> {
     }
 
     /// Keep tasks in `store` instead of in memory.
+    ///
+    /// This replaces the default store, and with it any limit set by
+    /// [`terminal_task_limit`](A2aServer::terminal_task_limit) called before
+    /// it: that limit is dropped. Set the limit on `store` itself, for
+    /// example with `InMemoryTaskStore::with_terminal_task_limit`.
     pub fn task_store<T: TaskStore>(self, store: T) -> A2aServer<T> {
         A2aServer {
             executor: self.executor,
