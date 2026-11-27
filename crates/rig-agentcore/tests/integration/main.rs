@@ -11,6 +11,7 @@ mod history;
 mod limits;
 mod ping;
 mod summary;
+mod summary_span;
 
 /// Pins a global default (`NoSubscriber`) once per test binary. See
 /// rig-multiagent's `tests/integration/telemetry.rs` for why: without it,

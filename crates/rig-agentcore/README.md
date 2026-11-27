@@ -63,6 +63,12 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
   (its compaction is a planning API the caller drives), so this option is built on its
   compaction helpers.
 
+  Each summary attempt is traced as an `agentcore.summarize` span under the invocation span.
+  It records the messages summarized and kept, the outcome (`summarized`, `skipped_changed`,
+  `skipped_nothing_older` or `failed`), and the summarizer's token usage. The prompt and the
+  summary text are recorded only with `record_content`. Success is also an info event, and a
+  failure keeps its warning.
+
   ```rust
   use rig_agent::Agent;
   use rig_agentcore::AgentCoreApp;

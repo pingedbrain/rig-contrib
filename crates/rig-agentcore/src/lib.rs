@@ -240,6 +240,13 @@ impl AgentCoreApp {
     /// [`history_store`](Self::history_store), the summary is written to the
     /// store's log in place of the messages it replaces, which the log keeps in
     /// its history.
+    ///
+    /// Each attempt is traced as an `agentcore.summarize` span under the
+    /// invocation span. It records the messages summarized and kept, the
+    /// outcome (`summarized`, `skipped_changed`, `skipped_nothing_older` or
+    /// `failed`), and the summarizer's token usage when the provider reports
+    /// it. The prompt and the summary text are recorded only with
+    /// [`record_content`](Self::record_content), as the other GenAI content is.
     #[must_use]
     pub fn summarize_history(
         self,
@@ -486,8 +493,14 @@ async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, Histor
     let mut messages = inner.history.load(session).await?;
     if let Some(summarizing) = &inner.summarizing
         && messages.len() > summarizing.trigger_messages
-        && let Some(summarized) =
-            summarize(inner.history.as_ref(), summarizing, session, &messages).await
+        && let Some(summarized) = summarize(
+            inner.history.as_ref(),
+            summarizing,
+            session,
+            &messages,
+            inner.record_content,
+        )
+        .await
     {
         messages = summarized;
     }
@@ -521,7 +534,7 @@ async fn whole(
     let history = match within(deadline, history_of(inner, &session)).await {
         Ok(Ok(history)) => history,
         Ok(Err(failure)) => {
-            tracing::warn!(error = %failure, "could not load the conversation");
+            tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not load the conversation");
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the conversation could not be loaded",
@@ -555,7 +568,7 @@ async fn whole(
             Json(json!({"response": answer, "status": "success"})).into_response()
         }
         Ok(Err(failure)) => {
-            tracing::warn!(error = %failure, "agent run failed");
+            tracing::warn!(error = %logged(inner.record_content, "run_failed", &failure), "agent run failed");
             error(StatusCode::INTERNAL_SERVER_ERROR, "the agent run failed")
         }
     }
@@ -606,7 +619,7 @@ async fn save(inner: &Inner, session: &str, messages: Vec<Message>) {
         None => inner.window.as_ref(),
     };
     if let Err(failure) = inner.history.append(session, messages, window).await {
-        tracing::warn!(error = %failure, "could not save the conversation");
+        tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not save the conversation");
     }
 }
 
@@ -630,7 +643,7 @@ fn stream(
             let history = match within(deadline, history_of(inner, &session)).await {
                 Ok(Ok(history)) => history,
                 Ok(Err(failure)) => {
-                    tracing::warn!(error = %failure, "could not load the conversation");
+                    tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not load the conversation");
                     let _ = sender.send(json!({"error": "the conversation could not be loaded"}));
                     return;
                 }
@@ -671,7 +684,7 @@ fn stream(
                     }
                     Ok(_) => {}
                     Err(failure) => {
-                        tracing::warn!(error = %failure, "agent run failed");
+                        tracing::warn!(error = %logged(inner.record_content, "run_failed", &failure), "agent run failed");
                         let _ = sender.send(json!({"error": "the agent run failed"}));
                         return;
                     }
@@ -689,6 +702,20 @@ fn stream(
         ))
     });
     Sse::new(events).into_response()
+}
+
+/// What a log line says about a failure. A provider's error text can echo the
+/// prompt, so it is logged only with `record_content`; otherwise its kind is.
+pub(crate) fn logged(
+    record_content: bool,
+    kind: &'static str,
+    failure: &dyn std::fmt::Display,
+) -> String {
+    if record_content {
+        failure.to_string()
+    } else {
+        kind.to_owned()
+    }
 }
 
 /// Record the agent's answer on the invocation span, the current one.

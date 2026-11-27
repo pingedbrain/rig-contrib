@@ -4,6 +4,8 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Fix: a failed summary or agent run no longer logs the provider's error text unless `record_content` is set. The log names the failure kind (`run_failed`, `empty_reply`, `store_error`) instead. The same applies to the conversation load and save warnings.
+- Each summary attempt runs in an `agentcore.summarize` span under the invocation span, with the messages summarized and kept, the outcome (`summarized`, `skipped_changed`, `skipped_nothing_older` or `failed`) and the summarizer's token usage. Success logs an info event; failure keeps its warning. The prompt and summary are recorded only with `record_content`.
 - `serve()` logs a `warn` when `PORT` is set but is not a port number, and serves on 8080 as
   before, so the app stays reachable. The warning names the value.
 - Docs: content recording is documented the same way as in the other crates, and `AgentCoreApp::record_content` overrides the agent's own setting.
