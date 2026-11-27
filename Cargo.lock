@@ -2654,6 +2654,7 @@ dependencies = [
  "reqwest",
  "rig-agent",
  "rig-core",
+ "rig-memory",
  "rig-otel",
  "serde",
  "serde_json",
