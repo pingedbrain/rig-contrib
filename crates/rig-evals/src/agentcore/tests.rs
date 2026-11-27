@@ -5,17 +5,17 @@ use serde_json::json;
 use super::*;
 use crate::{ExpectedCall, TurnFailed};
 
-const ARN: &str = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-VDrTj0Hfw9";
+const ARN: &str = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/agent-AbC123xyz";
 
 #[test]
 fn the_runtime_id_is_the_last_arn_segment() {
-    assert_eq!(runtime_id(ARN).unwrap(), "rig_lab-VDrTj0Hfw9");
+    assert_eq!(runtime_id(ARN).unwrap(), "agent-AbC123xyz");
     assert_eq!(
         runtime_log_group(ARN, "DEFAULT").unwrap(),
-        "/aws/bedrock-agentcore/runtimes/rig_lab-VDrTj0Hfw9-DEFAULT"
+        "/aws/bedrock-agentcore/runtimes/agent-AbC123xyz-DEFAULT"
     );
     for arn in [
-        "rig_lab",
+        "my_agent",
         "arn:aws:bedrock-agentcore:us-east-1:1:runtime/",
         "arn:x:agent/a",
     ] {

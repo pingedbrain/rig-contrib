@@ -29,7 +29,7 @@ fn streamed_failures_are_classified_by_status_and_retryability() {
 
 #[test]
 fn agent_names_become_provider_safe_tool_names() {
-    assert_eq!(tool_name("rig-lab assistant"), "rig_lab_assistant");
+    assert_eq!(tool_name("research assistant"), "research_assistant");
     assert_eq!(tool_name("  "), "agent");
     assert_eq!(tool_name(&"x".repeat(80)).len(), 64);
 }
