@@ -10,6 +10,8 @@ use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 use rig_multiagent::{Graph, GraphEvent, HANDOFF_TOOL, NodeError, Swarm, SwarmEvent, node_fn};
 use serde_json::json;
 
+use crate::swarm::Lookup;
+
 type Reply = std::pin::Pin<Box<dyn Future<Output = Result<String, NodeError>> + Send>>;
 
 /// An agent whose model streams each turn's events, ending each turn.
@@ -221,4 +223,43 @@ async fn dropping_the_stream_stops_the_run() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     assert_eq!(ran.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_streamed_graph_agent_calls_a_tool_then_answers() {
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("call-1", "lookup", json!({"topic": "export"})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            text("It has 3 columns."),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    // No default_max_turns: the graph's budget must cover the tool call and its answer.
+    let research = AgentBuilder::new(model.clone())
+        .name("research")
+        .tool(Lookup)
+        .build();
+    let graph = Graph::builder()
+        .node("research", research)
+        .build()
+        .expect("the builder is valid");
+
+    let lines: Vec<String> = graph
+        .stream("How many columns?")
+        .map(|event| graph_line(&event))
+        .collect()
+        .await;
+
+    assert!(
+        lines.contains(&"finish research: It has 3 columns.".to_owned()),
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("done: It has 3 columns.")
+    );
+    assert_eq!(model.requests().len(), 2);
 }

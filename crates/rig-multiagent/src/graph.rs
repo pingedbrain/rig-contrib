@@ -17,6 +17,7 @@ use crate::checkpoint::{CheckpointError, Checkpoints, Saving};
 use crate::events::{Emit, events};
 use crate::human::{Clock, Question};
 use crate::node::{Node, NodeError, NodeIo, NodeOutput};
+use crate::swarm::DEFAULT_MAX_TURNS;
 
 /// An edge's condition.
 #[cfg(not(target_family = "wasm"))]
@@ -53,6 +54,7 @@ struct Inner {
     edges: Vec<Edge>,
     entries: Vec<usize>,
     max_node_executions: Option<usize>,
+    max_turns: usize,
     execution_timeout: Duration,
     node_timeout: Duration,
     checkpoints: Option<Checkpoints>,
@@ -84,6 +86,7 @@ pub struct GraphBuilder {
     edges: Vec<(String, String, Option<Condition>)>,
     entries: Vec<String>,
     max_node_executions: Option<usize>,
+    max_turns: usize,
     execution_timeout: Duration,
     node_timeout: Duration,
     checkpoints: Option<Checkpoints>,
@@ -97,6 +100,7 @@ impl Graph {
             edges: Vec::new(),
             entries: Vec::new(),
             max_node_executions: None,
+            max_turns: DEFAULT_MAX_TURNS,
             execution_timeout: Duration::from_secs(15 * 60),
             node_timeout: Duration::from_secs(5 * 60),
             checkpoints: None,
@@ -158,6 +162,16 @@ impl GraphBuilder {
         self
     }
 
+    /// How many model calls one agent node's run may make, counting the first
+    /// call and every follow-up after a tool call. An agent whose own
+    /// `default_max_turns` is higher keeps its own. Defaults to 8; zero fails
+    /// the build with [`BuildError::ZeroTurns`]. Nodes that are swarms or
+    /// functions are not affected.
+    pub fn max_turns_per_agent(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
     /// How long a whole run may take. Defaults to 15 minutes.
     pub fn execution_timeout(mut self, timeout: Duration) -> Self {
         self.execution_timeout = timeout;
@@ -185,6 +199,9 @@ impl GraphBuilder {
     pub fn build(self) -> Result<Graph, BuildError> {
         if self.nodes.is_empty() {
             return Err(BuildError::Empty);
+        }
+        if self.max_turns == 0 {
+            return Err(BuildError::ZeroTurns);
         }
         let mut nodes: Vec<GraphNode> = Vec::with_capacity(self.nodes.len());
         for (id, node) in self.nodes {
@@ -234,6 +251,7 @@ impl GraphBuilder {
                 edges,
                 entries,
                 max_node_executions: self.max_node_executions,
+                max_turns: self.max_turns,
                 execution_timeout: self.execution_timeout,
                 node_timeout: self.node_timeout,
                 checkpoints: self.checkpoints,
@@ -792,7 +810,9 @@ impl Graph {
                         );
                         async move {
                             let Some(emit) = emit else {
-                                let io = NodeIo::quiet(&node.id).saving_to(saving);
+                                let io = NodeIo::quiet(&node.id)
+                                    .saving_to(saving)
+                                    .with_turns(inner.max_turns);
                                 let run = node.node.run(input, &io).instrument(span.clone());
                                 let outcome = clock.within(budget, run).await;
                                 record_node(&span, &outcome);
@@ -814,7 +834,8 @@ impl Graph {
                                 emit(GraphEvent::Question(question.pausing(clock)))
                             };
                             let io = NodeIo::streaming(&node.id, &on_text, &on_question)
-                                .saving_to(saving);
+                                .saving_to(saving)
+                                .with_turns(inner.max_turns);
                             let run = node.node.run(input, &io).instrument(span.clone());
                             let outcome = clock.within(budget, run).await;
                             record_node(&span, &outcome);

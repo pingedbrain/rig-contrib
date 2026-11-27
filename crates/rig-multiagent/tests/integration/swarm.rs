@@ -1,10 +1,39 @@
 //! Swarms driven by scripted models: no keys, no network.
 
+use rig_agent::completion::PromptError;
 use rig_agent::{Agent, AgentBuilder};
 use rig_core::completion::{CompletionRequest, Usage};
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
+use rig_core::tool::{Tool, ToolContext};
 use rig_multiagent::{BuildError, HANDOFF_TOOL, Swarm, SwarmFailure};
-use serde_json::json;
+use serde_json::{Value, json};
+
+/// A tool that answers with a fact the next model call can read.
+#[derive(Clone, Default)]
+pub(crate) struct Lookup;
+
+#[derive(Debug, thiserror::Error)]
+#[error("unreachable")]
+pub(crate) struct Never;
+
+impl Tool for Lookup {
+    const NAME: &'static str = "lookup";
+    type Args = Value;
+    type Output = String;
+    type Error = Never;
+
+    fn description(&self) -> String {
+        "Look a fact up.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {"topic": {"type": "string"}}})
+    }
+
+    async fn call(&self, _context: &mut ToolContext, _args: Value) -> Result<String, Never> {
+        Ok("The export has 3 columns.".into())
+    }
+}
 
 fn agent(name: &str, description: &str, turns: Vec<MockTurn>) -> (Agent, MockCompletionModel) {
     let model = MockCompletionModel::from_turns(turns);
@@ -268,4 +297,157 @@ fn bad_swarms_do_not_build() {
         Some(BuildError::UnknownName("b".into()))
     );
     assert_eq!(Swarm::builder().build().err(), Some(BuildError::Empty));
+}
+
+/// An agent with no turn budget of its own: the swarm must give it one.
+fn bare(name: &str, turns: Vec<MockTurn>) -> (Agent, MockCompletionModel) {
+    let model = MockCompletionModel::from_turns(turns);
+    let agent = AgentBuilder::new(model.clone())
+        .name(name)
+        .description("Looks things up")
+        .tool(Lookup)
+        .build();
+    (agent, model)
+}
+
+#[tokio::test]
+async fn an_agent_calls_a_tool_then_answers_inside_a_swarm() {
+    let (researcher, model) = bare(
+        "researcher",
+        vec![
+            MockTurn::tool_call("call-1", "lookup", json!({"topic": "export"})),
+            MockTurn::text("It has 3 columns."),
+        ],
+    );
+    let (coder, _) = agent("coder", "Writes Rust", vec![]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm
+        .run("How many columns?")
+        .await
+        .expect("the run succeeds");
+
+    assert_eq!(run.answer, "It has 3 columns.");
+    assert_eq!(run.agents, ["researcher"]);
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "one call for the tool, one for the answer"
+    );
+    let follow_up = sent(model.requests().get(1).expect("item 1"));
+    assert!(
+        follow_up.contains("The export has 3 columns."),
+        "{follow_up}"
+    );
+}
+
+#[tokio::test]
+async fn a_refused_handoff_is_followed_by_an_answer() {
+    let (solo, model) = bare(
+        "solo",
+        vec![handoff("ghost", "Help"), MockTurn::text("Did it myself.")],
+    );
+    let (other, _) = agent("other", "Unused", vec![]);
+    let swarm = Swarm::builder()
+        .agent(solo)
+        .agent(other)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm.run("Task").await.expect("the run succeeds");
+
+    assert_eq!(run.answer, "Did it myself.");
+    assert_eq!(run.agents, ["solo"]);
+    assert!(run.handoffs.is_empty());
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn max_turns_per_agent_caps_each_run() {
+    let (researcher, _) = bare(
+        "researcher",
+        vec![
+            MockTurn::tool_call("call-1", "lookup", json!({"topic": "export"})),
+            MockTurn::text("It has 3 columns."),
+        ],
+    );
+    let (coder, _) = agent("coder", "Writes Rust", vec![]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .max_turns_per_agent(1)
+        .build()
+        .expect("the builder is valid");
+
+    let error = swarm
+        .run("How many columns?")
+        .await
+        .expect_err("one turn cannot fit a tool call and its answer");
+
+    match &error.reason {
+        SwarmFailure::Agent { agent, source } => {
+            assert_eq!(agent, "researcher");
+            assert!(matches!(**source, PromptError::MaxTurns { .. }), "{source}");
+        }
+        other => panic!("expected an agent failure, got {other}"),
+    }
+}
+
+#[tokio::test]
+async fn an_agent_keeps_a_higher_turn_budget_of_its_own() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("call-1", "lookup", json!({"topic": "export"})),
+        MockTurn::tool_call("call-2", "lookup", json!({"topic": "export"})),
+        MockTurn::text("It has 3 columns."),
+    ]);
+    let researcher = AgentBuilder::new(model.clone())
+        .name("researcher")
+        .description("Looks things up")
+        .tool(Lookup)
+        .default_max_turns(3)
+        .build();
+    let (coder, _) = agent("coder", "Writes Rust", vec![]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .max_turns_per_agent(2)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm
+        .run("How many columns?")
+        .await
+        .expect("the run succeeds");
+
+    assert_eq!(run.answer, "It has 3 columns.");
+    assert_eq!(model.requests().len(), 3);
+}
+
+#[test]
+fn a_zero_turn_budget_does_not_build() {
+    let (solo, _) = agent("solo", "Does it all", vec![]);
+    let built = Swarm::builder().agent(solo).max_turns_per_agent(0).build();
+    assert_eq!(built.err(), Some(BuildError::ZeroTurns));
+}
+
+#[tokio::test]
+async fn one_turn_still_runs_handoffs_and_direct_answers() {
+    let (researcher, researcher_model) = bare("researcher", vec![handoff("coder", "Write it")]);
+    let (coder, coder_model) = bare("coder", vec![MockTurn::text("fn parse() {}")]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .max_turns_per_agent(1)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm.run("Parse it").await.expect("the run succeeds");
+
+    assert_eq!(run.answer, "fn parse() {}");
+    assert_eq!(researcher_model.requests().len(), 1);
+    assert_eq!(coder_model.requests().len(), 1);
 }

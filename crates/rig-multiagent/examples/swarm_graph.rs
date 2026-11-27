@@ -18,10 +18,6 @@
 //! mode the model decides what each agent says, so only the scripted run
 //! checks the join. A live model may also keep handing off instead of
 //! answering, so a live run can stop at `max_handoffs` with an error.
-//!
-//! Swarm agents need `default_max_turns`: the handoff is a tool call, and a Rig
-//! agent's default of one turn ends before the tool result is used. See
-//! `Swarm::agent` in the crate docs.
 
 use std::error::Error;
 
@@ -112,9 +108,6 @@ fn build(model: impl Into<DynModel<Completion>>, name: &str, description: &str) 
     AgentBuilder::new(model)
         .name(name)
         .description(description)
-        // Swarm agents hand off by tool call: one turn for the call, one
-        // more for the next answer. Rig's default of one turn is too few.
-        .default_max_turns(4)
         .max_tokens(256)
         .build()
 }

@@ -14,6 +14,8 @@ use rig_multiagent::{
 };
 use serde_json::json;
 
+use crate::swarm::Lookup;
+
 type Reply = std::pin::Pin<Box<dyn Future<Output = Result<String, NodeError>> + Send>>;
 
 fn agent(name: &str, turns: Vec<MockTurn>) -> (Agent, MockCompletionModel) {
@@ -271,4 +273,37 @@ async fn a_question_outlives_the_process_that_asked_it() {
     assert_eq!(resumed.unwrap(), ["build"]);
     assert_eq!(outcome.unwrap().unwrap().answer(), "deployed");
     assert_eq!(builds.load(Ordering::SeqCst), 0, "the build is not redone");
+}
+
+#[tokio::test]
+async fn a_swarm_resumes_after_a_tool_call_and_a_failed_answer() {
+    let store = MemoryStore::default();
+    // The tool-then-answer script: the answer's call fails once, then answers.
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("call-1", "lookup", json!({"topic": "export"})),
+        MockTurn::error("503"),
+        MockTurn::text("It has 3 columns."),
+    ]);
+    let researcher = AgentBuilder::new(model.clone())
+        .name("researcher")
+        .description("Looks things up")
+        .tool(Lookup)
+        .build();
+    let (coder, _) = agent("coder", vec![]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .checkpoints(store)
+        .build()
+        .unwrap();
+
+    let error = swarm
+        .run_as("job-2", "How many columns?")
+        .await
+        .unwrap_err();
+    assert!(matches!(error.reason, SwarmFailure::Agent { ref agent, .. } if agent == "researcher"));
+
+    let run = swarm.run_as("job-2", "ignored on resume").await.unwrap();
+    assert_eq!(run.answer, "It has 3 columns.");
+    assert_eq!(run.agents, ["researcher"]);
 }

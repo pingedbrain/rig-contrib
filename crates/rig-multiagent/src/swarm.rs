@@ -20,7 +20,11 @@ use crate::BuildError;
 use crate::checkpoint::{CheckpointError, Checkpoints, Journal, Saving};
 use crate::events::{Emit, events, stream_agent};
 use crate::human::{Clock, Question, answer};
-use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput, in_conversation};
+use crate::node::{Meter, Node, NodeError, NodeIo, NodeOutput, in_conversation, turn_budget};
+
+/// The model calls one agent's run may make unless the swarm or graph sets
+/// another number.
+pub(crate) const DEFAULT_MAX_TURNS: usize = 8;
 
 /// The name of the tool a swarm gives each of its agents.
 pub const HANDOFF_TOOL: &str = "handoff_to_agent";
@@ -49,6 +53,7 @@ struct Inner {
     /// The member the run starts with, one of `members`.
     entry: Arc<Member>,
     max_handoffs: usize,
+    max_turns: usize,
     execution_timeout: Duration,
     agent_timeout: Duration,
     repetition: Option<Repetition>,
@@ -74,6 +79,7 @@ pub struct SwarmBuilder {
     agents: Vec<Agent>,
     entry: Option<String>,
     max_handoffs: usize,
+    max_turns: usize,
     execution_timeout: Duration,
     agent_timeout: Duration,
     repetition: Option<Repetition>,
@@ -88,6 +94,7 @@ impl Swarm {
             agents: Vec::new(),
             entry: None,
             max_handoffs: 20,
+            max_turns: DEFAULT_MAX_TURNS,
             execution_timeout: Duration::from_secs(15 * 60),
             agent_timeout: Duration::from_secs(5 * 60),
             repetition: None,
@@ -104,13 +111,12 @@ impl SwarmBuilder {
     /// The swarm adds the [`handoff_to_agent`](HANDOFF_TOOL) tool to the
     /// agent's tool set, which clones of the agent share.
     ///
-    /// Give the agent a turn budget with
-    /// [`default_max_turns`](rig_agent::AgentBuilder::default_max_turns). A
-    /// handoff that goes through ends the turn at once, so one turn is enough
-    /// for it; but a tool call whose result the agent must read first (a
-    /// refused handoff, or any other tool it has) needs a second turn. Rig's
-    /// default is one turn, and the swarm does not raise it, so such a call
-    /// fails with `MaxTurns`.
+    /// Each run of the agent gets [`max_turns_per_agent`](SwarmBuilder::max_turns_per_agent)
+    /// model calls, or the agent's own
+    /// [`default_max_turns`](rig_agent::AgentBuilder::default_max_turns) if
+    /// that is higher. Rig's own default of one turn is never used here, so a
+    /// refused handoff, or a tool whose result the agent must read, gets its
+    /// follow-up answer.
     pub fn agent(mut self, agent: Agent) -> Self {
         self.agents.push(agent);
         self
@@ -125,6 +131,17 @@ impl SwarmBuilder {
     /// How many handoffs a run may make before it fails. Defaults to 20.
     pub fn max_handoffs(mut self, max_handoffs: usize) -> Self {
         self.max_handoffs = max_handoffs;
+        self
+    }
+
+    /// How many model calls one agent's run may make, counting the first call
+    /// and every follow-up after a tool call. Applies to each agent run; an
+    /// agent whose own `default_max_turns` is higher keeps its own. Defaults
+    /// to 8; zero fails the build with [`BuildError::ZeroTurns`]. A handoff
+    /// ends the run at once, so the budget only has to cover the tool calls an
+    /// agent makes before it answers or hands off.
+    pub fn max_turns_per_agent(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
         self
     }
 
@@ -174,6 +191,9 @@ impl SwarmBuilder {
         if self.agents.is_empty() {
             return Err(BuildError::Empty);
         }
+        if self.max_turns == 0 {
+            return Err(BuildError::ZeroTurns);
+        }
         let mut members: Vec<Member> = Vec::with_capacity(self.agents.len());
         for agent in self.agents {
             let name = agent.name().ok_or(BuildError::UnnamedAgent)?.to_owned();
@@ -208,6 +228,7 @@ impl SwarmBuilder {
                 members,
                 entry,
                 max_handoffs: self.max_handoffs,
+                max_turns: self.max_turns,
                 execution_timeout: self.execution_timeout,
                 agent_timeout: self.agent_timeout,
                 repetition: self.repetition,
@@ -671,7 +692,11 @@ impl Swarm {
                 .as_ref()
                 .map(|saving| saving.part("journal", "turn", trail.agents.len()));
             let key = part.as_ref().map(|part| part.run_id.clone());
-            let mut runner = in_conversation(member.agent.prompt(input), &member.agent, key)
+            let prompt = member
+                .agent
+                .prompt(input)
+                .max_turns(turn_budget(&member.agent, inner.max_turns));
+            let mut runner = in_conversation(prompt, &member.agent, key)
                 .tool_context(ToolContext::new().with_scope(turn.clone()))
                 .add_hook(meter.clone());
             if let Some(journal) = part {
