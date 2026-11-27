@@ -71,7 +71,9 @@ impl McpServer {
     ///
     /// # Errors
     ///
-    /// [`BuildError::DuplicateTool`] when two tools share a name.
+    /// [`BuildError::DuplicateTool`] when two tools share a name,
+    /// [`BuildError::DuplicateResource`] when two resources share a URI, or
+    /// [`BuildError::DuplicatePrompt`] when two prompts share a name.
     pub fn into_router(self) -> Result<axum::Router, BuildError> {
         let expected: Option<Arc<str>> = self
             .bearer

@@ -8,6 +8,7 @@ Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
   (`resources/list`, `resources/read`, `prompts/list`, `prompts/get`). The server
   advertises those capabilities only when it has some; templates, subscriptions and
   list-changed notifications are not supported.
+- `into_router` docs list the duplicate resource and prompt errors, not only duplicate tools.
 - README snippets are compile-checked as doctests, so the examples cannot rot.
 
 ## 0.47.3 (2026-11-27)
