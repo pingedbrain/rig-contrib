@@ -51,8 +51,8 @@ const JUNIT: &str = "target/evals/junit.xml";
 const RUBRIC: &str = "Is the answer polite, correct and on topic?";
 /// The live agent's preamble. The judge checks each answer against the case's
 /// expected answer and assertions, so the live agent is given the facts those
-/// cases state, and the apology the `refund-followup` assertion asks for. The
-/// scripted answers already state them.
+/// cases state, and the apology the `refund` assertion asks for. The scripted
+/// answers already state them.
 const LIVE_PREAMBLE: &str = "You are the support desk. Use the tools to look up and refund orders. \
     Store hours are 9 to 5, Monday to Friday. To cancel a subscription, open Settings, \
     then Billing. Apologize when an order arrived broken.";
@@ -241,8 +241,11 @@ async fn run(backend: Backend) -> Result<Report> {
                 .tool(Refund)
                 .default_max_turns(4)
                 .build();
-            let judge = LlmJudge::new(AgentBuilder::new(client.completion(&model)).build(), RUBRIC)
-                .threshold(0.7);
+            // goal_success reads every turn of a multi-turn case; the rubric judge
+            // sees only the final answer, which cannot show an earlier apology.
+            let judge =
+                LlmJudge::goal_success(AgentBuilder::new(client.completion(&model)).build())
+                    .threshold(0.7);
             // Free-text answers: no `equals`, see the header.
             Ok(experiment(agent, judge, false)?.run().await?)
         }
