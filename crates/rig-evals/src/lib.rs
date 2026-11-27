@@ -42,6 +42,8 @@
 //! it, so a tracing exporter (such as rig-otel) puts the results on the
 //! evaluated agent's trace. The agent's prompts and replies reach that trace
 //! only when it records content, with `AgentBuilder::record_content_telemetry(true)`.
+//! A score's explanation (the judge's text) is recorded only with
+//! `Experiment::record_content(true)`.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

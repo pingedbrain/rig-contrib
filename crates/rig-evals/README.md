@@ -207,13 +207,15 @@ The experiment is an `eval.experiment` span, and each trial an `eval.trial` span
 (`eval.case`, `eval.repetition`) that the agent's own spans nest in. Each score is a
 `gen_ai.evaluation.result` event on the trial span, with `gen_ai.evaluation.name`,
 `gen_ai.evaluation.score.value`, `gen_ai.evaluation.score.label` (the label, or
-`pass`/`fail`) and `gen_ai.evaluation.explanation`: the event of the OpenTelemetry GenAI
-semantic conventions (development status). The crate only emits `tracing` data; with
+`pass`/`fail`) and, with `Experiment::record_content(true)`, `gen_ai.evaluation.explanation`:
+the event of the OpenTelemetry GenAI semantic conventions (development status). The crate only emits `tracing` data; with
 [rig-otel](https://crates.io/crates/rig-otel) installed, any OTel backend shows the results on the evaluated
 run's trace.
 
 The evaluated agent's prompts and replies reach these traces only when it records content
-(`AgentBuilder::record_content_telemetry(true)`); it is off by default.
+(`AgentBuilder::record_content_telemetry(true)`); it is off by default. The explanation
+is the judge's text and can quote the answer or the prompt, so it is also off by default:
+`Experiment::record_content(true)` records it. The report always keeps it.
 
 ## Providers
 
