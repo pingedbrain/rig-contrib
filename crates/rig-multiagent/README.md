@@ -263,6 +263,48 @@ run id is 1-128 of `[A-Za-z0-9_-]`; a run is one JSON file,
 `rig-multiagent/{swarm,graph}/<run_id>.json`, plus one per journal and nested run,
 each written atomically.
 
+## Run state
+
+Request-scoped values, such as a user id, a tenant or a database handle, go in a
+`RunState`, given to the run with `run_with_state`, `stream_with_state` or
+`run_as_with_state`. Function nodes made with `node_fn_with_state`, edge conditions
+(`state.run_state().get::<T>()`) and nested graphs read them.
+
+```rust
+use rig_multiagent::{BuildError, Graph, GraphState, NodeError, RunState, node_fn_with_state};
+
+struct Tenant(String);
+
+fn build() -> Result<Graph, BuildError> {
+    Graph::builder()
+        .node("fetch", node_fn_with_state(|input: String, state: RunState| async move {
+            let Some(tenant) = state.get::<Tenant>() else {
+                return Err(NodeError::from("no tenant"));
+            };
+            Ok(format!("{}: {input}", tenant.0))
+        }))
+        .node("ready", node_fn_with_state(|input: String, _state: RunState| async move {
+            Ok(input)
+        }))
+        .edge_if("fetch", "ready", |state: &GraphState| {
+            state.run_state().get::<Tenant>().is_some()
+        })
+        .build()
+}
+
+async fn answer(graph: &Graph, tenant: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let state = RunState::new().with(Tenant(tenant.to_owned()));
+    Ok(graph.run_with_state("Summarise my invoices", state).await?.answer())
+}
+```
+
+- The values are never sent to a model: an agent node gets only its input text.
+- Agent tools cannot read them. Rig gives a tool only its serializable `ToolContext`,
+  so give a tool what it needs through its own fields or arguments. Swarm agents do not
+  get the state either.
+- Checkpoints do not keep the state. A run resumed with `run_as_with_state` or
+  `stream_as_with_state` must be given the state again.
+
 ## Prompt caching
 
 Each conversation of a run, a swarm agent's turn or an agent node's run, sends one
