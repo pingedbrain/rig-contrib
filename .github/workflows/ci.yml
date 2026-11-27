@@ -56,6 +56,15 @@ jobs:
         with:
           command: check advisories licenses
 
+  semver:
+    name: semver checks (vs crates.io)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Compares every workspace crate with its latest version on crates.io.
+      - uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+
   interop-a2a:
     name: "rig-a2a interop (Strands 1.66 / A2A v0.3, a2a-sdk 1.x / A2A v1.0)"
     runs-on: ubuntu-latest
