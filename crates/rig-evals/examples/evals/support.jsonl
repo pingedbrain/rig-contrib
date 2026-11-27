@@ -3,4 +3,4 @@
 {"id": "greeting", "input": "Hi there!", "assertions": ["is polite"]}
 {"id": "order9", "input": "Where is order 9?", "trajectory": [{"name": "lookup_order", "args": {"id": 9}}]}
 {"id": "cancel", "input": "How do I cancel my subscription?", "assertions": ["explains where to cancel"]}
-{"id": "refund-followup", "turns": ["Order 7 arrived broken.", "Please refund that order."], "expected": "A refund was issued for order 7.", "assertions": ["apologizes"]}
+{"id": "refund-followup", "turns": ["Order 7 arrived broken.", "Please refund that order."], "expected": "A refund was issued for order 7.", "assertions": ["confirms the refund for order 7"]}

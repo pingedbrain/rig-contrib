@@ -6,8 +6,7 @@
 //! cargo run -p rig-multiagent --example swarm_graph
 //!
 //! # Live: every agent calls a model on OpenRouter. Set the model to use; the
-//! # key is read from OPENROUTER_API_KEY and never printed. Replies are capped
-//! # at 1024 tokens to keep the run cheap; a reasoning model needs the room.
+//! # key is read from OPENROUTER_API_KEY and never printed.
 //! OPENROUTER_API_KEY=... OPENROUTER_MODEL=deepseek/deepseek-chat \
 //!     cargo run -p rig-multiagent --example swarm_graph
 //!
@@ -19,6 +18,10 @@
 //!
 //! Live mode is chosen by `OPENROUTER_MODEL` or `RIG_MODEL`, not by the key
 //! alone, so a key in the environment does not start paid calls by accident.
+//! Live replies are capped at 4096 tokens. Reasoning tokens count toward the
+//! cap, so a reasoning model cut at a lower cap stops with `finish_reason`
+//! `length`. Set `RIG_MAX_TOKENS` to change the cap. The scripted run keeps its
+//! 1024-token cap.
 //! The scripted answers come from Rig's mock models, as the crate's tests use
 //! them; in live
 //! mode the model decides what each agent says, so only the scripted run
@@ -44,9 +47,18 @@ type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 enum Backend {
     /// Rig's mock models, scripted per agent.
     Scripted,
-    /// A model on OpenRouter.
-    Live { client: OpenAI, model: String },
+    /// A model on OpenRouter or OpenCode Go.
+    Live {
+        client: OpenAI,
+        model: String,
+        max_tokens: u64,
+    },
 }
+
+/// The reply cap for the scripted run, as before.
+const SCRIPTED_MAX_TOKENS: u64 = 1024;
+/// The reply cap for live runs. Reasoning tokens count toward it.
+const LIVE_MAX_TOKENS: u64 = 4096;
 
 impl Backend {
     fn from_env() -> Result<Self> {
@@ -63,14 +75,23 @@ impl Backend {
             return Ok(Self::Live {
                 client: opencode::go_new(key),
                 model: name.to_owned(),
+                max_tokens: live_max_tokens()?,
             });
         }
         match std::env::var("OPENROUTER_MODEL") {
             Ok(model) if !model.is_empty() => Ok(Self::Live {
                 client: openrouter::from_env()?,
                 model,
+                max_tokens: live_max_tokens()?,
             }),
             _ => Ok(Self::Scripted),
+        }
+    }
+
+    fn max_tokens(&self) -> u64 {
+        match self {
+            Self::Scripted => SCRIPTED_MAX_TOKENS,
+            Self::Live { max_tokens, .. } => *max_tokens,
         }
     }
 
@@ -79,6 +100,16 @@ impl Backend {
             Self::Scripted => "scripted models".into(),
             Self::Live { model, .. } => format!("live model {model}"),
         }
+    }
+}
+
+/// `RIG_MAX_TOKENS` if set, else the live default.
+fn live_max_tokens() -> Result<u64> {
+    match std::env::var("RIG_MAX_TOKENS") {
+        Ok(value) => value
+            .parse()
+            .map_err(|error| format!("RIG_MAX_TOKENS: {error}").into()),
+        Err(_) => Ok(LIVE_MAX_TOKENS),
     }
 }
 
@@ -93,11 +124,22 @@ fn agent(
     match backend {
         Backend::Scripted => {
             let model = MockCompletionModel::from_turns(turns);
-            (build(model.clone(), name, description), Some(model))
+            (
+                build(model.clone(), name, description, backend.max_tokens()),
+                Some(model),
+            )
         }
-        Backend::Live { client, model } => {
+        Backend::Live { client, model, .. } => {
             let _ = turns; // the live model writes its own turns
-            (build(client.completion(model), name, description), None)
+            (
+                build(
+                    client.completion(model),
+                    name,
+                    description,
+                    backend.max_tokens(),
+                ),
+                None,
+            )
         }
     }
 }
@@ -116,20 +158,30 @@ fn streaming_agent(
                 turn
             });
             let model = MockCompletionModel::from_stream_turns(turns);
-            build(model, name, description)
+            build(model, name, description, backend.max_tokens())
         }
-        Backend::Live { client, model } => {
+        Backend::Live { client, model, .. } => {
             let _ = turns; // the live model writes its own turns
-            build(client.completion(model), name, description)
+            build(
+                client.completion(model),
+                name,
+                description,
+                backend.max_tokens(),
+            )
         }
     }
 }
 
-fn build(model: impl Into<DynModel<Completion>>, name: &str, description: &str) -> Agent {
+fn build(
+    model: impl Into<DynModel<Completion>>,
+    name: &str,
+    description: &str,
+    max_tokens: u64,
+) -> Agent {
     AgentBuilder::new(model)
         .name(name)
         .description(description)
-        .max_tokens(1024)
+        .max_tokens(max_tokens)
         .build()
 }
 

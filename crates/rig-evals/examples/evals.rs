@@ -12,19 +12,29 @@
 //! # key is read from OPENROUTER_API_KEY and never printed.
 //! OPENROUTER_API_KEY=... OPENROUTER_MODEL=deepseek/deepseek-chat \
 //!     cargo run -p rig-evals --example evals
+//!
+//! # Live on OpenCode Go instead: RIG_MODEL=opencode-go/<model>, with the key in
+//! # OPENCODE_GO_API_KEY (or OPENCODE_API_KEY), never printed.
+//! RIG_MODEL=opencode-go/glm-5.3 OPENCODE_GO_API_KEY=... \
+//!     cargo run -p rig-evals --example evals
 //! ```
 //!
 //! The report goes to stdout; the mode and the JUnit path go to stderr. The
 //! JUnit path is relative to the directory `cargo run` is started in (not the
 //! package), so it lands in `./target/evals/` there. The exit code is the
 //! report's: 1 when an evaluator misses its threshold.
+//!
+//! A live run leaves out the `equals` evaluator. It compares the answer byte
+//! for byte with `expected`, so a model's free-text answer never passes it. The
+//! judge grades the live answers against the rubric instead. The scripted run
+//! keeps `equals`.
 
 use std::error::Error;
 
 use rig_agent::AgentBuilder;
 use rig_agent::tool::{Tool, ToolContext};
 use rig_core::providers::openai::OpenAI;
-use rig_core::providers::openrouter;
+use rig_core::providers::{opencode, openrouter};
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
 use rig_evals::evaluators::TrajectoryMode;
 use rig_evals::{
@@ -39,6 +49,13 @@ type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 const DATASET: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/evals/support.jsonl");
 const JUNIT: &str = "target/evals/junit.xml";
 const RUBRIC: &str = "Is the answer polite, correct and on topic?";
+/// The live agent's preamble. The judge checks each answer against the case's
+/// expected answer and assertions, so the live agent is given the facts those
+/// cases state, and the apology the `refund` assertion asks for. The scripted
+/// answers already state them.
+const LIVE_PREAMBLE: &str = "You are the support desk. Use the tools to look up and refund orders. \
+    Store hours are 9 to 5, Monday to Friday. To cancel a subscription, open Settings, \
+    then Billing. Apologize when an order arrived broken.";
 
 /// Where the agent and the judge get their answers.
 enum Backend {
@@ -49,8 +66,22 @@ enum Backend {
 }
 
 impl Backend {
-    /// Live only when both `OPENROUTER_MODEL` and `OPENROUTER_API_KEY` are set.
+    /// `RIG_MODEL=opencode-go/<model>` picks OpenCode Go. Otherwise live only
+    /// when both `OPENROUTER_MODEL` and `OPENROUTER_API_KEY` are set.
     fn from_env() -> Result<Self> {
+        if let Ok(model) = std::env::var("RIG_MODEL")
+            && let Some(name) = model.strip_prefix("opencode-go/")
+        {
+            if name.is_empty() {
+                return Err("RIG_MODEL is opencode-go/ with no model name".into());
+            }
+            let key = std::env::var("OPENCODE_GO_API_KEY")
+                .or_else(|_| std::env::var("OPENCODE_API_KEY"))?;
+            return Ok(Self::Live {
+                client: opencode::go_new(key),
+                model: name.to_owned(),
+            });
+        }
         let model = std::env::var("OPENROUTER_MODEL").unwrap_or_default();
         let key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
         match (model.is_empty(), key.is_empty()) {
@@ -172,13 +203,18 @@ fn scripted_judge() -> LlmJudge {
     LlmJudge::new(agent, RUBRIC).threshold(0.7)
 }
 
-/// The experiment, for any target and judge.
-fn experiment(target: impl Target + 'static, judge: LlmJudge) -> Result<Experiment> {
-    Ok(Experiment::new("support-bot")
+/// The experiment, for any target and judge. `exact` adds the `equals`
+/// evaluator, which only scripted answers can pass.
+fn experiment(target: impl Target + 'static, judge: LlmJudge, exact: bool) -> Result<Experiment> {
+    let mut experiment = Experiment::new("support-bot")
         .dataset(Dataset::load(DATASET)?)
-        .target(target)
-        // Not applicable where a case has no expected answer or trajectory.
-        .evaluator(evaluators::equals().not_applicable_without_reference())
+        .target(target);
+    if exact {
+        // Not applicable where a case has no expected answer.
+        experiment = experiment.evaluator(evaluators::equals().not_applicable_without_reference());
+    }
+    Ok(experiment
+        // Not applicable where a case has no expected trajectory.
         .evaluator(
             evaluators::trajectory(TrajectoryMode::InOrder).not_applicable_without_reference(),
         )
@@ -193,21 +229,25 @@ async fn run(backend: Backend) -> Result<Report> {
     match backend {
         Backend::Scripted => {
             eprintln!("mode: scripted (no key)");
-            Ok(experiment(scripted_target(), scripted_judge())?
+            Ok(experiment(scripted_target(), scripted_judge(), true)?
                 .run()
                 .await?)
         }
         Backend::Live { client, model } => {
-            eprintln!("mode: live, OpenRouter model {model}");
+            eprintln!("mode: live, model {model}");
             let agent = AgentBuilder::new(client.completion(&model))
-                .preamble("You are the support desk. Use the tools to look up and refund orders.")
+                .preamble(LIVE_PREAMBLE)
                 .tool(LookupOrder)
                 .tool(Refund)
                 .default_max_turns(4)
                 .build();
-            let judge = LlmJudge::new(AgentBuilder::new(client.completion(&model)).build(), RUBRIC)
-                .threshold(0.7);
-            Ok(experiment(agent, judge)?.run().await?)
+            // goal_success reads every turn of a multi-turn case; the rubric judge
+            // sees only the final answer, which cannot show an earlier apology.
+            let judge =
+                LlmJudge::goal_success(AgentBuilder::new(client.completion(&model)).build())
+                    .threshold(0.7);
+            // Free-text answers: no `equals`, see the header.
+            Ok(experiment(agent, judge, false)?.run().await?)
         }
     }
 }

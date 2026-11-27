@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Examples: `evals` takes `RIG_MODEL=opencode-go/<model>` for a live run, as `swarm_graph` does. A live run drops the `equals` evaluator, which only passes byte-exact answers; it judges with `LlmJudge::goal_success`, which reads every turn; and it gives the live agent the facts and apology the cases expect.
 - Docs: on a multi-turn case, `LlmJudge` (and its presets) gets every turn in its prompt, but the verdict and the case's `assertions` are about the final answer. An assertion about an earlier turn should say so ("at any turn, apologizes"), or use `LlmJudge::goal_success`. The prompt itself is unchanged.
 
 - Experiment comparison: `Report::compare(&baseline)` on the candidate report returns a `Comparison`. It gives, per evaluator, the pass-rate and mean deltas (`EvaluatorDelta`); the regressions and fixes, matched by case id (`CaseChange`; a case passes when all its trials pass); the cases only one report has; and the token and latency deltas. `Comparison::to_markdown` and `to_json` render it. Reports already deserialize, so a saved baseline loads with `serde_json::from_str::<Report>`.
