@@ -228,8 +228,9 @@ fn serve_with_push(agent: Agent, token: &str) -> A2aServer {
 - **Slow webhooks slow tasks.** Delivery runs in the task's event loop, one config at a
   time, with a 5 second timeout per POST. A task with 10 stalled configs can take 50
   seconds per update, and the client's stream waits for it.
-- **Configs outlive tasks.** A task holds up to 10 configs and the server up to 10,000.
-  Set `terminal_task_limit` as well, as above, so finished tasks and their configs are purged.
+- **Configs outlive tasks.** A task holds up to 10 configs, and the server up to 10,000
+  counted since it started. A finished task keeps its configs until the total is reached;
+  then the configs of tasks purged by `terminal_task_limit` are dropped, so set it as above.
 
 Saving a config checks its URL: it must be `https` (`http` only with
 `allow_unguarded_push_urls()`), on the allowlist if one is set, and not a literal IP in
@@ -241,8 +242,9 @@ redirects to them: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.2
 the hosts `localhost`, `metadata.google.internal` and `metadata.azure.com`. Names that
 resolve into the literal-check ranges above are not refused at delivery.
 
-`allow_unguarded_push_urls()` drops the `https` requirement and the SDK's address guard,
-and lets the SDK use the proxies named in the environment. Use it for tests against a
+`allow_unguarded_push_urls()` drops the `https` requirement, the save-time refusal of the
+literal ranges above, and the SDK's address guard, and lets the SDK use the proxies named
+in the environment. Use it for tests against a
 webhook on this machine only. `push_config_store` keeps configs in your own store, and
 the same checks and caps apply to it. The v0.3 card under `/v03` keeps
 `pushNotifications: false`.

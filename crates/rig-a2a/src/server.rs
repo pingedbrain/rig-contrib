@@ -20,7 +20,7 @@ use rig_agent::Agent;
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
 use crate::A2aExecutor;
-use crate::push::PushSettings;
+use crate::push::{PushSettings, SharedTasks};
 use crate::v03::{self, V03_PATH};
 
 /// The path of the JSON-RPC binding under the server's base URL.
@@ -212,7 +212,10 @@ impl<S: TaskStore> A2aServer<S> {
     /// `pushNotifications: true`.
     ///
     /// Configs are kept in memory unless [`push_config_store`](Self::push_config_store)
-    /// is set. At most 10 configs per task and 10,000 in all are accepted.
+    /// is set. At most 10 configs per task are accepted, and 10,000 in all
+    /// counted since the server started. When the total is reached, configs
+    /// of tasks that [`terminal_task_limit`](Self::terminal_task_limit) has
+    /// purged are dropped, so the total counts live tasks.
     /// Each config is checked when it is saved: its URL must be `https`, on
     /// the list from [`push_allowed_hosts`](Self::push_allowed_hosts) if one
     /// is set, and not a literal IP in 100.64.0.0/10, 64:ff9b::/96, 2002::/16
@@ -245,10 +248,10 @@ impl<S: TaskStore> A2aServer<S> {
     ///   loop, one config at a time, and each POST has a 5 second timeout. A
     ///   task with 10 configs whose receivers all stall can take up to 50
     ///   seconds per update, and the client's stream waits for it.
-    /// - Each task holds up to 10 configs and the server up to 10,000, so
-    ///   configs outlive a finished task. Set
-    ///   [`terminal_task_limit`](Self::terminal_task_limit) too, so finished
-    ///   tasks, and their configs, are purged.
+    /// - A finished task's configs stay until the total cap is reached. Set
+    ///   [`terminal_task_limit`](Self::terminal_task_limit) too: then the
+    ///   oldest finished tasks are purged, and their configs are dropped at
+    ///   the next save that reaches the total cap.
     ///
     /// ```ignore
     /// let server = A2aServer::new(agent, "https://agent.example.com")
@@ -287,11 +290,12 @@ impl<S: TaskStore> A2aServer<S> {
     }
 
     /// Drop the checks that keep a webhook URL from reaching a private
-    /// target: the `https` requirement and the SDK's address guard (loopback,
-    /// private and link-local addresses, DNS and redirects). Also lets the
-    /// SDK send webhooks through the proxies named in the environment. For
-    /// tests against a webhook on this machine only. The host allowlist still
-    /// applies.
+    /// target: the `https` requirement, the refusal on save of the literal
+    /// ranges 100.64.0.0/10, 64:ff9b::/96, 2002::/16 and ::a.b.c.d/96, and
+    /// the SDK's address guard (loopback, private and link-local addresses,
+    /// DNS and redirects). Also lets the SDK send webhooks through the
+    /// proxies named in the environment. For tests against a webhook on this
+    /// machine only. The host allowlist still applies.
     #[must_use]
     pub fn allow_unguarded_push_urls(mut self) -> Self {
         self.push.allow_unguarded = true;
@@ -332,12 +336,18 @@ impl<S: TaskStore> A2aServer<S> {
             );
         }
         card.capabilities.push_notifications = Some(push_on);
-        let mut handler = DefaultRequestHandler::new(self.executor, self.store)
-            .with_capabilities(card.capabilities.clone())
-            .with_default_input_modes(card.default_input_modes.clone());
+        // The handler and the push wrapper read one task store: the wrapper
+        // needs it to tell live tasks from purged ones.
+        let tasks: Arc<dyn TaskStore> = Arc::new(self.store);
+        let mut handler =
+            DefaultRequestHandler::new(self.executor, SharedTasks(Arc::clone(&tasks)))
+                .with_capabilities(card.capabilities.clone())
+                .with_default_input_modes(card.default_input_modes.clone());
         if push_on {
-            handler =
-                handler.with_push_notifications(self.push.checked_store(), self.push.sender());
+            handler = handler.with_push_notifications(
+                self.push.checked_store(Arc::clone(&tasks)),
+                self.push.sender(),
+            );
         }
         let handler = Arc::new(handler);
         let v03_card = v03::card(
