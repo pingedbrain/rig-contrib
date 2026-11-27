@@ -33,6 +33,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+
+use crate::client::read_capped;
 use serde_json::{Value, json};
 
 /// Where the v0.3 surface is mounted under the server's base URL.
@@ -435,10 +437,16 @@ pub(crate) async fn send(
     message: &Message,
 ) -> Result<StreamResponse, crate::RemoteError> {
     let params = json!({"message": message_json(message), "configuration": {"blocking": true}});
-    let frame: Value = call(http, url, bearer, "message/send", params)
-        .await?
-        .json()
-        .await?;
+    let response = call(http, url, bearer, "message/send", params).await?;
+    let Some(body) = read_capped(response, MAX_REPLY_BYTES).await? else {
+        return Err(A2AError::new(
+            INVALID_PARAMS,
+            format!("reply longer than {MAX_REPLY_BYTES} bytes"),
+        )
+        .into());
+    };
+    let frame: Value = serde_json::from_slice(&body)
+        .map_err(|e| A2AError::new(INVALID_PARAMS, format!("bad reply: {e}")))?;
     Ok(response_from_frame(&frame)?)
 }
 
@@ -465,6 +473,9 @@ pub(crate) async fn stream(
     }
     .boxed())
 }
+
+/// Largest reply a v0.3 agent may send to `message/send`.
+const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Largest event a v0.3 agent may send before its blank line. A longer one
 /// ends the stream with an error instead of growing the buffer.

@@ -329,7 +329,8 @@ impl RemoteAgentBuilder {
             read_capped(response, MAX_CARD_BYTES).await
         })
         .await
-        .map_err(|_| RemoteError::Timeout(self.timeout))??;
+        .map_err(|_| RemoteError::Timeout(self.timeout))??
+        .ok_or_else(|| RemoteError::Card(format!("larger than {MAX_CARD_BYTES} bytes")))?;
         let card: Value = serde_json::from_slice(&body)
             .map_err(|e| RemoteError::Card(format!("not JSON: {e}")))?;
 
@@ -649,17 +650,21 @@ fn describe_file(file: &RemoteFile, images: &mut Vec<ToolResultContent>) -> Valu
     Value::Object(described)
 }
 
-/// The body of a response, refused once it passes `limit` bytes.
-async fn read_capped(response: reqwest::Response, limit: usize) -> Result<Vec<u8>, RemoteError> {
+/// The body of a response, read chunk by chunk; `None` once it passes
+/// `limit` bytes, so a long body is never held whole.
+pub(crate) async fn read_capped(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, reqwest::Error> {
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
         body.extend_from_slice(&chunk?);
         if body.len() > limit {
-            return Err(RemoteError::Card(format!("larger than {limit} bytes")));
+            return Ok(None);
         }
     }
-    Ok(body)
+    Ok(Some(body))
 }
 
 /// A v0.3 card read as a v1.0 one, for [`RemoteAgent::card`]: one JSON-RPC
