@@ -23,6 +23,7 @@ use rig_memory::{
     save_async, serialize_conversation,
 };
 use sha2::{Digest, Sha256};
+use tracing::{Instrument, Span};
 
 /// The longest session id whose own characters name its log. Longer or
 /// other ids are hashed.
@@ -288,6 +289,18 @@ enum SummarizeError {
     Changed,
 }
 
+impl SummarizeError {
+    /// The kind of failure, which is all a log line may say without `record_content`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Run(_) => "run_failed",
+            Self::Empty => "empty_reply",
+            Self::Store(_) => "store_error",
+            Self::Changed => "changed",
+        }
+    }
+}
+
 /// A probe summary whose text marks where the summary text falls in its frame.
 const PROBE: &str = "\u{1}";
 
@@ -348,21 +361,64 @@ fn summary_prompt(read: &[Arc<Message>]) -> String {
 /// and return the session's messages after it. `None` when nothing is older
 /// than the newest messages or the summary failed; the failure is logged and
 /// the history is left as it was.
+///
+/// Each attempt runs in an `agentcore.summarize` span, under the invocation
+/// span, with its outcome: `summarized`, `skipped_changed`, `failed`, or
+/// `skipped_nothing_older`. The prompt and the summary are recorded only when
+/// `record_content` is set.
 pub(crate) async fn summarize(
     store: &dyn HistoryStore,
     summarizing: &Summarizing,
     session: &str,
     messages: &[Arc<Message>],
+    record_content: bool,
 ) -> Option<Vec<Arc<Message>>> {
     let cut = safe_start(
         messages,
         messages.len().saturating_sub(summarizing.keep_recent),
     );
-    let read = messages.get(..cut).filter(|read| !read.is_empty())?;
-    match try_summarize(store, summarizing, session, read).await {
-        Ok(messages) => Some(messages),
+    let kept = messages.len().saturating_sub(cut);
+    let span = tracing::info_span!(
+        "agentcore.summarize",
+        agentcore.session_id = %session,
+        agentcore.summary.messages_summarized = cut,
+        agentcore.summary.messages_kept = kept,
+        agentcore.summary.outcome = tracing::field::Empty,
+        gen_ai.usage.input_tokens = tracing::field::Empty,
+        gen_ai.usage.output_tokens = tracing::field::Empty,
+        agentcore.summary.prompt = tracing::field::Empty,
+        agentcore.summary.text = tracing::field::Empty,
+    );
+    let Some(read) = messages.get(..cut).filter(|read| !read.is_empty()) else {
+        span.record("agentcore.summary.outcome", "skipped_nothing_older");
+        return None;
+    };
+    let attempt = try_summarize(store, summarizing, session, read, record_content, &span)
+        .instrument(span.clone())
+        .await;
+    match attempt {
+        Ok(summarized) => {
+            span.record("agentcore.summary.outcome", "summarized");
+            tracing::info!(
+                parent: &span,
+                messages_summarized = cut,
+                messages_kept = kept,
+                "summarized the conversation"
+            );
+            Some(summarized)
+        }
+        Err(SummarizeError::Changed) => {
+            span.record("agentcore.summary.outcome", "skipped_changed");
+            tracing::info!(
+                parent: &span,
+                "the conversation changed while it was summarized; keeping its history"
+            );
+            None
+        }
         Err(error) => {
-            tracing::warn!(error = %error, "could not summarize the conversation; keeping its full history");
+            span.record("agentcore.summary.outcome", "failed");
+            let shown = crate::logged(record_content, error.kind(), &error);
+            tracing::warn!(parent: &span, error = %shown, "could not summarize the conversation; keeping its full history");
             None
         }
     }
@@ -373,17 +429,33 @@ async fn try_summarize(
     summarizing: &Summarizing,
     session: &str,
     read: &[Arc<Message>],
+    record_content: bool,
+    span: &Span,
 ) -> Result<Vec<Arc<Message>>, SummarizeError> {
+    let prompt = summary_prompt(read);
+    if record_content {
+        span.record("agentcore.summary.prompt", prompt.as_str());
+    }
     let response = summarizing
         .summarizer
-        .prompt(summary_prompt(read))
+        .prompt(prompt)
         .run()
         .await
         .map_err(|failure| SummarizeError::Run(failure.to_string()))?;
+    let usage = response.usage();
+    if let Some(input) = usage.input_tokens {
+        span.record("gen_ai.usage.input_tokens", input);
+    }
+    if let Some(output) = usage.output_tokens {
+        span.record("gen_ai.usage.output_tokens", output);
+    }
     let text = response.output();
     let text = text.trim();
     if text.is_empty() {
         return Err(SummarizeError::Empty);
+    }
+    if record_content {
+        span.record("agentcore.summary.text", text);
     }
     let state = SummaryState {
         summary: text.to_owned(),
