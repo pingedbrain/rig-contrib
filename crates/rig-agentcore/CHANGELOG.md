@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- Docs: `AgentCoreApp::record_content` always overrides the agent's `record_content_telemetry`, so the agent's setting is ignored when served through the app. To record prompt and answer content, call `.record_content(true)` on the app. This is planned to change in 0.48 (PR #42), so that an unset app setting keeps the agent's.
+
 ## 0.47.4 (2026-11-27)
 
 - Fix: a failed summary or agent run no longer logs the provider's error text unless `record_content` is set. The log names the failure kind (`run_failed`, `empty_reply`, `store_error`) instead. The same applies to the conversation load and save warnings.
