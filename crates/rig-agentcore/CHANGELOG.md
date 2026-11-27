@@ -4,6 +4,7 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Each summary attempt runs in an `agentcore.summarize` span under the invocation span, with the messages summarized and kept, the outcome (`summarized`, `skipped_changed`, `skipped_nothing_older` or `failed`) and the summarizer's token usage. Success logs an info event; failure keeps its warning. The prompt and summary are recorded only with `record_content`.
 - `serve()` logs a `warn` when `PORT` is set but is not a port number, and serves on 8080 as
   before, so the app stays reachable. The warning names the value.
 - Docs: content recording is documented the same way as in the other crates, and `AgentCoreApp::record_content` overrides the agent's own setting.

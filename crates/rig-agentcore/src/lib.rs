@@ -240,6 +240,13 @@ impl AgentCoreApp {
     /// [`history_store`](Self::history_store), the summary is written to the
     /// store's log in place of the messages it replaces, which the log keeps in
     /// its history.
+    ///
+    /// Each attempt is traced as an `agentcore.summarize` span under the
+    /// invocation span. It records the messages summarized and kept, the
+    /// outcome (`summarized`, `skipped_changed`, `skipped_nothing_older` or
+    /// `failed`), and the summarizer's token usage when the provider reports
+    /// it. The prompt and the summary text are recorded only with
+    /// [`record_content`](Self::record_content), as the other GenAI content is.
     #[must_use]
     pub fn summarize_history(
         self,
@@ -486,8 +493,14 @@ async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, Histor
     let mut messages = inner.history.load(session).await?;
     if let Some(summarizing) = &inner.summarizing
         && messages.len() > summarizing.trigger_messages
-        && let Some(summarized) =
-            summarize(inner.history.as_ref(), summarizing, session, &messages).await
+        && let Some(summarized) = summarize(
+            inner.history.as_ref(),
+            summarizing,
+            session,
+            &messages,
+            inner.record_content,
+        )
+        .await
     {
         messages = summarized;
     }
