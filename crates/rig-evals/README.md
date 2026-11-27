@@ -125,6 +125,30 @@ nondeterministic agent. `Report::passed()` is false when any evaluator misses it
 threshold: use it as the exit code. The JUnit report has one test case per trial and per
 threshold, so CI test views show the failures.
 
+## Timeouts
+
+`trial_timeout(limit)` gives each target run and each evaluator call at most `limit`. A
+run that takes longer fails its trial with `timed out after <n>s`; the other trials run on.
+It is off unless set.
+
+```rust
+use std::time::Duration;
+
+use rig_agent::Agent;
+use rig_evals::{Dataset, Experiment, evaluators};
+
+async fn checked(dataset: Dataset, agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    let report = Experiment::new("support-bot")
+        .dataset(dataset)
+        .target(agent)
+        .evaluator(evaluators::no_error())
+        .trial_timeout(Duration::from_secs(60))
+        .run()
+        .await?;
+    std::process::exit(if report.passed() { 0 } else { 1 });
+}
+```
+
 ## Sinks
 
 A `Sink` receives the report. `JsonFile`, `JunitFile` and `Markdown` (a file, such as

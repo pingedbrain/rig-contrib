@@ -1,12 +1,13 @@
 //! Running a target on a dataset and scoring every run.
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tracing::Instrument;
 
 use crate::evaluator::clamp;
+use crate::target::{Deadline, TRIAL_DEADLINE, timeout_message};
 use crate::{
     Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult,
     TurnFailed,
@@ -31,6 +32,7 @@ pub struct Experiment {
     concurrency: usize,
     thresholds: Vec<(String, f64)>,
     sinks: Vec<Box<dyn Sink>>,
+    trial_timeout: Option<Duration>,
 }
 
 impl Experiment {
@@ -45,6 +47,7 @@ impl Experiment {
             concurrency: 4,
             thresholds: Vec::new(),
             sinks: Vec::new(),
+            trial_timeout: None,
         }
     }
 
@@ -96,6 +99,20 @@ impl Experiment {
     #[must_use]
     pub fn sink(mut self, sink: impl Sink + 'static) -> Self {
         self.sinks.push(Box::new(sink));
+        self
+    }
+
+    /// Give each target run and each evaluator call at most `limit`. One
+    /// that takes longer fails and the other trials carry on: a target that
+    /// times out makes a trial with the error `timed out after <n>s`, which
+    /// the built-in evaluators fail; an evaluator that times out gives a
+    /// failed score labelled `error`. An agent target keeps the turns it
+    /// completed, as a failed turn does. The limit is per call, not per run,
+    /// so a trial with `n` evaluators can take `n + 1` times `limit`. Off
+    /// unless set.
+    #[must_use]
+    pub fn trial_timeout(mut self, limit: Duration) -> Self {
+        self.trial_timeout = Some(limit);
         self
     }
 
@@ -211,7 +228,19 @@ impl Experiment {
         );
         async move {
             let started = Instant::now();
-            let ran = target.run(case).await;
+            let ran = match self.trial_timeout {
+                Some(limit) => {
+                    let deadline = Deadline {
+                        at: tokio::time::Instant::now() + limit,
+                        limit,
+                    };
+                    let run = TRIAL_DEADLINE.scope(deadline, target.run(case));
+                    tokio::time::timeout_at(deadline.at, run)
+                        .await
+                        .unwrap_or_else(|_| Err(timeout_message(limit).into()))
+                }
+                None => target.run(case).await,
+            };
             let mut trial = Trial::new(case.id.clone(), repetition, "");
             trial.latency = started.elapsed();
             match ran {
@@ -238,12 +267,20 @@ impl Experiment {
             let mut scores = Vec::with_capacity(self.evaluators.len());
             for evaluator in &self.evaluators {
                 let name = evaluator.name();
-                let mut score = evaluator
-                    .evaluate(case, &trial)
-                    .await
-                    .unwrap_or_else(|error| {
-                        Score::fail(name, error.to_string()).with_label("error")
-                    });
+                let failed =
+                    |explanation: String| Score::fail(name, explanation).with_label("error");
+                let mut score = match self.trial_timeout {
+                    Some(limit) => {
+                        match tokio::time::timeout(limit, evaluator.evaluate(case, &trial)).await {
+                            Ok(result) => result.unwrap_or_else(|error| failed(error.to_string())),
+                            Err(_) => failed(timeout_message(limit)),
+                        }
+                    }
+                    None => evaluator
+                        .evaluate(case, &trial)
+                        .await
+                        .unwrap_or_else(|error| failed(error.to_string())),
+                };
                 score.evaluator = name.to_owned();
                 score.value = clamp(score.value);
                 let label =

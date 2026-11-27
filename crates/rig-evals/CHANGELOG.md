@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Trial timeout: `Experiment::trial_timeout(Duration)` is opt-in (off by default). A target run over the limit fails its trial with `timed out after <n>s` (an agent keeps its completed turns, as a failed turn does); an evaluator call over it is a failed score labelled `error`. Other trials run on. `rig-evals` now depends on tokio's `rt` and `time` features in every build, not only with `agentcore`.
 - README snippets are compile-checked as doctests (the AgentCore example with the `agentcore` feature).
 - Tool results: `ToolCall` has a `result` field, the text the tool returned (cut to 4 KiB, marked `[truncated]`), filled by the agent target from the matching tool result (by call id). The faithfulness judge sees the results. `result` is left out of JSON when absent, so existing JSON is unchanged; AgentCore still records no tool calls.
 
