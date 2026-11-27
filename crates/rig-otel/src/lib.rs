@@ -46,6 +46,7 @@
 
 #[cfg(feature = "aws")]
 mod aws;
+mod endpoint;
 mod metrics;
 mod propagation;
 mod session;
@@ -214,6 +215,18 @@ impl TelemetryBuilder {
     /// without installing anything globally: for tests, or to install the
     /// subscriber yourself.
     pub fn build(self) -> Result<(Telemetry, impl Subscriber + Send + Sync), InitError> {
+        let (telemetry, subscriber, problems) = self.assemble()?;
+        endpoint::report(&problems);
+        Ok((telemetry, subscriber))
+    }
+
+    /// [`build`](Self::build) without reporting the endpoint problems yet:
+    /// `init` reports them once its subscriber is installed.
+    fn assemble(
+        self,
+    ) -> Result<(Telemetry, impl Subscriber + Send + Sync, Vec<String>), InitError> {
+        #[cfg_attr(not(feature = "otlp"), allow(unused_mut))]
+        let mut problems = Vec::new();
         let mut resource = Resource::builder();
         if let Some(name) = self.service_name {
             resource = resource.with_service_name(name);
@@ -227,11 +240,14 @@ impl TelemetryBuilder {
             Some(add) => add(traces),
             #[cfg(feature = "otlp")]
             None => {
+                let (url, problem) =
+                    endpoint::resolve("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "v1/traces");
+                problems.extend(problem);
                 let exporter = opentelemetry_otlp::SpanExporter::builder()
                     .with_http()
                     .build()
                     .map_err(InitError::SpanExporter)?;
-                traces.with_batch_exporter(exporter)
+                traces.with_batch_exporter(endpoint::Spans::new(exporter, url))
             }
             #[cfg(not(feature = "otlp"))]
             None => return Err(InitError::NoExporter),
@@ -243,11 +259,14 @@ impl TelemetryBuilder {
             Some(add) => add(meters),
             #[cfg(feature = "otlp")]
             None => {
+                let (url, problem) =
+                    endpoint::resolve("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "v1/metrics");
+                problems.extend(problem);
                 let exporter = opentelemetry_otlp::MetricExporter::builder()
                     .with_http()
                     .build()
                     .map_err(InitError::MetricExporter)?;
-                meters.with_periodic_exporter(exporter)
+                meters.with_periodic_exporter(endpoint::Metrics::new(exporter, url))
             }
             #[cfg(not(feature = "otlp"))]
             None => return Err(InitError::NoExporter),
@@ -294,14 +313,16 @@ impl TelemetryBuilder {
                 meter_provider,
             },
             subscriber,
+            problems,
         ))
     }
 
     /// [`build`](Self::build), then install the subscriber and the providers
     /// globally.
     pub fn init(self) -> Result<Telemetry, InitError> {
-        let (telemetry, subscriber) = self.build()?;
+        let (telemetry, subscriber, problems) = self.assemble()?;
         subscriber.try_init().map_err(InitError::Subscriber)?;
+        endpoint::report(&problems);
         opentelemetry::global::set_tracer_provider(telemetry.tracer_provider.clone());
         opentelemetry::global::set_meter_provider(telemetry.meter_provider.clone());
         Ok(telemetry)

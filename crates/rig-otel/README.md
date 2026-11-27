@@ -58,6 +58,24 @@ as Jaeger, rejects them, while traces still arrive.
 own span and metric exporters (in-memory ones in tests), and `build()` hands you the
 subscriber to install yourself.
 
+## No traces showing up?
+
+- **Check the endpoint value.** `OTEL_EXPORTER_OTLP_ENDPOINT` (or the traces or metrics
+  variable) must be an `http` or `https` URL with a host. Anything else, such as
+  `not-a-url`, is reported at startup, and setup still succeeds without a collector.
+- **Turn on logs.** Export failures are warnings, and they reach stderr only when
+  `RUST_LOG` is set: `RUST_LOG=warn` shows them, plus the OpenTelemetry SDK's own error
+  lines. Each warning names the signal (`traces` or `metrics`) and the endpoint. At most
+  one a minute is logged per exporter, with a count of the ones skipped.
+- **Check the collector answers.** `curl -v <endpoint>/v1/traces` should get an HTTP
+  response of any status. "Connection refused" means nothing listens there. A timeout
+  means it is unreachable from this machine.
+- **Check the signal.** A collector that takes traces only, such as Jaeger, rejects
+  metrics. Traces still arrive, so a `metrics` warning alone does not explain missing
+  traces.
+- **Flush before exit.** Dropping `Telemetry` flushes, but ignores export errors. Call
+  `force_flush()` where delivery matters.
+
 ## Metrics
 
 | Name | Unit | Attributes | Source | Closest Strands name |
