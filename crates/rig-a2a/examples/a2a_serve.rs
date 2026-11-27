@@ -3,7 +3,7 @@
 //! Run with `OPENAI_API_KEY` set:
 //!
 //! ```sh
-//! cargo run --example serve
+//! cargo run --example a2a_serve
 //! ```
 //!
 //! Any A2A 1.0 client can then read the card at
