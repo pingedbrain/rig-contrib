@@ -7,19 +7,31 @@
 //!
 //! ```no_run
 //! use rig_evals::{Dataset, Experiment, JunitFile, evaluators};
-//! # async fn run(agent: rig_agent::Agent) -> Result<(), Box<dyn std::error::Error>> {
-//! let report = Experiment::new("support-bot")
-//!     .dataset(Dataset::load("evals/cases.jsonl")?)
-//!     .target(agent)
-//!     .evaluator(evaluators::contains("refund"))
-//!     .evaluator(evaluators::no_error())
-//!     .repetitions(3)
-//!     .threshold("contains", 0.8)
-//!     .sink(JunitFile::new("target/evals/junit.xml"))
-//!     .run()
-//!     .await?;
-//! std::process::exit(if report.passed() { 0 } else { 1 });
-//! # }
+//!
+//! async fn run(agent: rig_agent::Agent) -> Result<(), Box<dyn std::error::Error>> {
+//!     let report = Experiment::new("support-bot")
+//!         .dataset(Dataset::load("evals/cases.jsonl")?)
+//!         .target(agent)
+//!         .evaluator(evaluators::contains("refund"))
+//!         .evaluator(evaluators::no_error())
+//!         .repetitions(3)
+//!         .threshold("contains", 0.8)
+//!         .sink(JunitFile::new("target/evals/junit.xml"))
+//!         .run()
+//!         .await?;
+//!     std::process::exit(if report.passed() { 0 } else { 1 });
+//! }
+//! ```
+//!
+//! A dataset is a `.jsonl` file (one case per line) or a `.json` array. A case
+//! has an `id` and either an `input` (one prompt) or `turns` (a conversation).
+//! `expected`, `trajectory` (`name` and optional `args` per tool call),
+//! `assertions` and `metadata` are optional references. A three-case file:
+//!
+//! ```jsonl
+//! {"id": "refund", "input": "Order 7 arrived broken.", "expected": "A refund was issued.", "trajectory": [{"name": "lookup_order", "args": {"id": 7}}, {"name": "refund"}], "assertions": ["apologizes"]}
+//! {"id": "hours", "input": "What are your opening hours?", "expected": "We are open 9 to 5.", "assertions": ["gives the hours"]}
+//! {"id": "city", "turns": ["My favourite city is Lisbon.", "What is my favourite city?"], "expected": "Lisbon"}
 //! ```
 //!
 //! With the `agentcore` feature, `AgentCore` makes a runtime on AWS Bedrock
@@ -28,7 +40,8 @@
 //! Each run is a `tracing` span `eval.trial` inside an `eval.experiment` span,
 //! and each score an OpenTelemetry GenAI `gen_ai.evaluation.result` event on
 //! it, so a tracing exporter (such as rig-otel) puts the results on the
-//! evaluated agent's trace.
+//! evaluated agent's trace. The agent's prompts and replies reach that trace
+//! only when it records content, with `AgentBuilder::record_content_telemetry(true)`.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

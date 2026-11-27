@@ -4,6 +4,7 @@ Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Docs: the front page shows serving over Streamable HTTP with a bearer token and how an HTTP client connects; the README shows the Claude Code HTTP command and where content recording is set.
 - Agents that hit their turn limit now say how to raise it: the error result names `AgentBuilder::default_max_turns(n)`. Error variants and statuses are unchanged.
 - `McpServer::resource`, `binary_resource` and `prompt` offer fixed resources and prompts
   (`resources/list`, `resources/read`, `prompts/list`, `prompts/get`). The server

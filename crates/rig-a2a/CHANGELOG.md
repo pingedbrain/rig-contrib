@@ -4,6 +4,7 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Docs: the front page and README show calling a remote agent directly (`RemoteAgent::send`) and as a tool, and where content recording is set.
 - Agents that hit their turn limit now say how to raise it: the failed task names `AgentBuilder::default_max_turns(n)`. Error variants and statuses are unchanged.
 - Example `serve` is renamed `a2a_serve`: it clashed with the `serve` example of rig-agentcore. Run it with `cargo run --example a2a_serve`.
 - Example `remote_tool` runs without a key: with neither `RIG_MODEL` nor `OPENROUTER_MODEL` set, both agents use scripted models and the run checks that the remote agent was called.
