@@ -199,9 +199,9 @@ use rig_evals::{AgentCore, Dataset, Experiment, Markdown, evaluators};
 
 async fn agentcore_eval() -> Result<(), Box<dyn std::error::Error>> {
     let agentcore = AgentCore::from_env().await; // or AgentCore::new(&sdk_config)
-    let _report = Experiment::new("rig-lab")
+    let _report = Experiment::new("rig-agent")
         .dataset(Dataset::load("evals/math.jsonl")?)
-        .target(agentcore.target("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-AbCdE12345"))
+        .target(agentcore.target("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/<runtime-id>"))
         .evaluator(agentcore.evaluator("Builtin.Correctness").threshold(0.8))
         .evaluator(agentcore.evaluator("Builtin.Helpfulness"))
         .evaluator(evaluators::no_error())
