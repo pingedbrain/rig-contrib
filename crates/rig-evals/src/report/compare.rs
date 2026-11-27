@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::{EvaluatorSummary, LatencySummary, Report, Tokens, TrialResult, cell};
+use super::{EvaluatorSummary, LatencySummary, Report, Tokens, TrialResult, cell, one_line};
 
 /// One evaluator in a [`Comparison`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -22,17 +22,17 @@ pub struct EvaluatorDelta {
     /// evaluator.
     pub candidate: Option<EvaluatorSummary>,
     /// `candidate.pass_rate - baseline.pass_rate`; `None` unless both reports
-    /// have the evaluator. An evaluator with nothing applicable has a pass rate
-    /// of 0 in its summary.
+    /// have the evaluator with at least one scored trial (`count > 0`).
     pub pass_rate_delta: Option<f64>,
     /// `candidate.mean - baseline.mean`; `None` unless both reports have the
-    /// evaluator.
+    /// evaluator with at least one scored trial (`count > 0`).
     pub mean_delta: Option<f64>,
 }
 
 /// A case whose outcome changed between the two reports.
 ///
-/// A case passes in a report when every one of its trials passes.
+/// A case passes in a report when every one of its trials passes. Trials that
+/// share a case id are pooled into one case (see [`Report::compare`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CaseChange {
@@ -45,7 +45,9 @@ pub struct CaseChange {
 
 /// How a candidate run differs from a baseline run of the same experiment.
 ///
-/// Built by [`Report::compare`]. Cases are matched by id.
+/// Built by [`Report::compare`]. Cases are matched by id. Trials that share
+/// an id are pooled into one case, in both reports, so a duplicated id counts
+/// once in the regression, fix and only-in lists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Comparison {
@@ -84,6 +86,14 @@ impl Report {
     /// Compares this report (the candidate) with `baseline`: per evaluator the
     /// pass-rate and mean deltas, the cases that regressed or were fixed, the
     /// cases only one report has, and the token and latency deltas.
+    ///
+    /// Cases are matched by id. Trials that share an id within a report are
+    /// pooled into one case: it passes only when all of them pass, and its
+    /// failing evaluators are those of all of them. Repetitions of a case
+    /// therefore count as one case here, not as separate cases.
+    ///
+    /// An evaluator's deltas are `None` unless both reports score it in at
+    /// least one trial.
     ///
     /// ```
     /// use rig_evals::Report;
@@ -168,12 +178,12 @@ impl Comparison {
 
     /// The comparison as Markdown: a table per evaluator with the deltas, the
     /// regressions and fixes, the cases only one report has, and the token and
-    /// latency deltas.
+    /// latency deltas. A delta or value that does not apply is `-`.
     pub fn to_markdown(&self) -> String {
         let mut md = format!(
             "# Comparison: {} vs {}\n\n{} regressions, {} fixes.\n\n",
-            self.candidate_experiment,
-            self.baseline_experiment,
+            cell(&self.candidate_experiment),
+            cell(&self.baseline_experiment),
             self.regressions.len(),
             self.fixes.len()
         );
@@ -184,11 +194,13 @@ impl Comparison {
             let rate = |summary: &Option<EvaluatorSummary>| {
                 summary
                     .as_ref()
+                    .filter(|s| s.count > 0)
                     .map_or("-".to_owned(), |s| format!("{:.0}%", s.pass_rate * 100.0))
             };
             let mean = |summary: &Option<EvaluatorSummary>| {
                 summary
                     .as_ref()
+                    .filter(|s| s.count > 0)
                     .map_or("-".to_owned(), |s| format!("{:.2}", s.mean))
             };
             let pass_delta = delta
@@ -212,9 +224,9 @@ impl Comparison {
         md.push_str("\n## Fixes\n\n");
         push_changes(&mut md, &self.fixes, "No fixes.");
         md.push_str("\n## Cases in one report only\n\n");
-        let _ = write!(md, "Only in the baseline: ");
+        md.push_str("Only in the baseline: ");
         push_ids(&mut md, &self.only_in_baseline);
-        let _ = write!(md, "\nOnly in the candidate: ");
+        md.push_str("\nOnly in the candidate: ");
         push_ids(&mut md, &self.only_in_candidate);
         let _ = writeln!(
             md,
@@ -229,7 +241,7 @@ impl Comparison {
     }
 }
 
-/// Each case's trials in `report`, by case id.
+/// Each case's trials in `report`, by case id. Trials sharing an id are pooled.
 fn cases(report: &Report) -> BTreeMap<&str, Vec<&TrialResult>> {
     let mut map: BTreeMap<&str, Vec<&TrialResult>> = BTreeMap::new();
     for result in &report.trials {
@@ -256,7 +268,9 @@ fn evaluator_delta(
     baseline: Option<&EvaluatorSummary>,
     candidate: Option<&EvaluatorSummary>,
 ) -> EvaluatorDelta {
-    let both = baseline.zip(candidate);
+    let both = baseline
+        .zip(candidate)
+        .filter(|(base, cand)| base.count > 0 && cand.count > 0);
     EvaluatorDelta {
         evaluator: name.to_owned(),
         baseline: baseline.cloned(),
@@ -277,17 +291,36 @@ fn millis_delta(candidate: Duration, baseline: Duration) -> f64 {
     candidate.as_secs_f64() * 1000.0 - baseline.as_secs_f64() * 1000.0
 }
 
+/// `text` as a Markdown code span on one line. The fence is one backtick
+/// longer than the longest backtick run in `text`, so the span cannot end early.
+fn code_span(text: &str) -> String {
+    let text = one_line(text);
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest + 1);
+    let pad = if text.starts_with('`') || text.ends_with('`') {
+        " "
+    } else {
+        ""
+    };
+    format!("{fence}{pad}{text}{pad}{fence}")
+}
+
 fn push_changes(md: &mut String, changes: &[CaseChange], none: &str) {
     if changes.is_empty() {
         md.push_str(none);
         md.push('\n');
     }
     for change in changes {
+        let evaluators: Vec<String> = change
+            .evaluators
+            .iter()
+            .map(|name| one_line(name))
+            .collect();
         let _ = writeln!(
             md,
-            "- `{}`: {}",
-            change.case_id,
-            change.evaluators.join(", ")
+            "- {}: {}",
+            code_span(&change.case_id),
+            evaluators.join(", ")
         );
     }
 }
@@ -296,7 +329,7 @@ fn push_ids(md: &mut String, ids: &[String]) {
     if ids.is_empty() {
         md.push_str("none");
     } else {
-        let quoted: Vec<String> = ids.iter().map(|id| format!("`{id}`")).collect();
-        md.push_str(&quoted.join(", "));
+        let spans: Vec<String> = ids.iter().map(|id| code_span(id)).collect();
+        md.push_str(&spans.join(", "));
     }
 }
