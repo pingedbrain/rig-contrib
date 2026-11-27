@@ -42,6 +42,24 @@ rig_agentcore::AgentCoreApp::new(agent)
 
   `DirStore` needs rig-memory's `fs` feature: enable it in your own `Cargo.toml`
   (`rig-memory = { version = "0.47", features = ["fs"] }`).
+- **Summaries:** `summarize_history(summarizer, keep_recent, trigger_messages)` makes a
+  long session shorter. Once a session holds more than `trigger_messages` messages, an
+  agent without tools (`summarizer`) summarizes all but the newest `keep_recent`, and that
+  one summary becomes the session's first message. The cut never separates a tool call
+  from its result. If the summary fails, a warning is logged, the session keeps its full
+  history, and the invocation answers as usual. With `history_store`, the summary is written
+  to the store in place of the messages it replaces. Rig-memory has no summarizing window
+  (its compaction is a planning API the caller drives), so this option is built on its
+  compaction helpers.
+
+  ```rust
+  use rig_agent::Agent;
+  use rig_agentcore::AgentCoreApp;
+
+  fn app(agent: Agent, summarizer: Agent) -> AgentCoreApp {
+      AgentCoreApp::new(agent).summarize_history(summarizer, 20, 60)
+  }
+  ```
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
