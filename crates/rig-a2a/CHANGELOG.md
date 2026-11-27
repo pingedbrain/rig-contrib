@@ -7,7 +7,8 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 - README snippets are compile-checked as doctests; the `DirStore` example uses `DirStore::open`.
 - Added `A2aServer::terminal_task_limit(n)`: the default in-memory task store keeps at most `n`
   finished tasks and purges the oldest first. A purged task answers `GetTask` with
-  `TaskNotFound`; running tasks are never purged. The default stays unlimited, so existing
+  `TaskNotFound`; running tasks are never purged. A purged task can return if a late update
+  reaches it. The default stays unlimited, so existing
   servers behave as before.
 
 ## 0.47.3 (2026-11-27)
