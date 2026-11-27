@@ -1,5 +1,6 @@
 //! The MCP server: which Rig agents and tools it exposes, and how it runs them.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -182,10 +183,11 @@ impl McpServer {
                     .map_err(|error| {
                         tracing::warn!(%error, "typed agent call failed");
                         match &error {
-                            StructuredOutputError::Prompt(prompt) => failure_message(prompt),
-                            _ => "The agent could not produce a structured answer.",
+                            StructuredOutputError::Prompt(prompt) => {
+                                failure_message(prompt).into_owned()
+                            }
+                            _ => "The agent could not produce a structured answer.".to_owned(),
                         }
-                        .to_owned()
                     })?;
                 let value =
                     serde_json::to_value(&response.output).map_err(|error| error.to_string())?;
@@ -746,7 +748,7 @@ impl Handler {
                 Ok(_) => {}
                 Err(failure) => {
                     tracing::warn!(parent: &span, %failure, "agent call failed");
-                    return Ok(error(failure_message(&failure)));
+                    return Ok(error(&failure_message(&failure)));
                 }
             }
         }
@@ -761,12 +763,25 @@ impl Handler {
     }
 }
 
-/// What the calling model is told when a run fails: enough to decide whether
-/// to retry, without the provider's own error text (which can name internals).
+/// What the calling model is told when a run fails: enough to decide whether to
+/// retry, without the provider's own error text (which can name internals).
 ///
 /// A failure arrives as the provider's error from an awaited run, or as its
 /// report from a streamed one; both carry the status and whether to retry.
-fn failure_message(failure: &PromptError) -> &'static str {
+fn failure_message(failure: &PromptError) -> Cow<'static, str> {
+    if let PromptError::MaxTurns { max_turns, .. } = failure {
+        return Cow::Owned(if *max_turns <= 1 {
+            "The agent reached its turn limit (1); agents with tools usually need AgentBuilder::default_max_turns(n) with n >= 2.".to_owned()
+        } else {
+            format!(
+                "The agent reached its turn limit ({max_turns}); raise AgentBuilder::default_max_turns above {max_turns} if the task needs more steps."
+            )
+        });
+    }
+    Cow::Borrowed(status_message(failure))
+}
+
+fn status_message(failure: &PromptError) -> &'static str {
     let (status, retryable) = match failure {
         PromptError::Provider(provider) => (
             failure
@@ -780,9 +795,6 @@ fn failure_message(failure: &PromptError) -> &'static str {
                 .map(|status| status.as_u16())),
             report.retryable,
         ),
-        PromptError::MaxTurns { .. } => {
-            return "The agent used up its turns without finishing.";
-        }
         _ => (None, false),
     };
     match status {
