@@ -10,6 +10,9 @@
 //! | [`budget`] | `budget` | tokens and latency are within limits |
 //! | [`no_error`] | `no_error` | the target did not fail |
 //! | [`LlmJudge`] | `llm_judge` | a judge model scores the answer at least the threshold |
+//! | [`LlmJudge::helpfulness`] | `helpfulness` | a judge model scores the answer at least the threshold: it does what was asked |
+//! | [`LlmJudge::faithfulness`] | `faithfulness` | a judge model scores the answer at least the threshold: it is supported by the evidence |
+//! | [`LlmJudge::goal_success`] | `goal_success` | a judge model scores the answer at least the threshold: the user's goal is met by the last turn |
 //!
 //! All of them fail a trial whose target failed.
 //! [`named`](crate::Evaluator::named) renames one, to use two of a kind.
