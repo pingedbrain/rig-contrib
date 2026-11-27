@@ -6,6 +6,7 @@
     clippy::unreachable
 )]
 
+mod content;
 mod contract;
 mod history;
 mod limits;

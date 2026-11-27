@@ -109,10 +109,12 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
       });
   }
   ```
-- **Content:** `record_content(true)` records prompts and replies on the GenAI spans.
-  AgentCore Evaluations needs them to judge a session. They are off by default, as in Rig.
-  The setting applies to every invocation and overrides `AgentBuilder::record_content_telemetry`
-  on the agent.
+- **Content:** prompts and replies go on the spans. AgentCore Evaluations needs them to judge
+  a session. Without `record_content`, the agent's own `AgentBuilder::record_content_telemetry`
+  setting applies to its spans, so an agent built with it on records content. `record_content(true)`
+  or `record_content(false)` overrides that setting for every invocation. The invocation span
+  (`gen_ai.task.input`, `gen_ai.task.output`, `agentcore.invocation.*`) has no agent setting to
+  follow, so it carries content only with `record_content(true)`.
 
 ## Verified on AWS
 
@@ -271,7 +273,8 @@ export IMAGE=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
    aws xray update-trace-segment-destination --destination CloudWatchLogs --region $AWS_REGION
    ```
 
-   Then add traces to your agent. Build the agent with `record_content(true)`, call
+   Then add traces to your agent. Build the agent with `record_content_telemetry(true)`, set
+   `AgentCoreApp::record_content(true)` for the invocation span, call
    `rig_otel::Telemetry::builder().aws_cloudwatch().await`, and set
    `OTEL_RESOURCE_ATTRIBUTES=service.name=<name>,aws.log.group.names=/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`
    on the runtime, as `rig-otel` documents. AgentCore Observability and Evaluations then read

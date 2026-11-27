@@ -9,7 +9,7 @@ use rig_agentcore::{AgentCoreApp, SESSION_HEADER};
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
 use serde_json::{Value, json};
 
-async fn serve(app: AgentCoreApp) -> String {
+pub(crate) async fn serve(app: AgentCoreApp) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move { axum::serve(listener, app.router()).await.unwrap() });
