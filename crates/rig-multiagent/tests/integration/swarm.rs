@@ -224,6 +224,62 @@ async fn work_bouncing_between_two_agents_is_caught() {
 }
 
 #[tokio::test]
+async fn a_chain_that_moves_forward_is_not_stopped() {
+    let (first, first_model) = agent("first", "", vec![handoff("second", "Step two")]);
+    let (second, _) = agent("second", "", vec![handoff("third", "Step three")]);
+    let (third, _) = agent("third", "", vec![MockTurn::text("Done.")]);
+    let swarm = Swarm::builder()
+        .agent(first)
+        .agent(second)
+        .agent(third)
+        .detect_repetition(3, 3)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm.run("Task").await.expect("A, B, C is not repetitive");
+
+    assert_eq!(run.agents, ["first", "second", "third"]);
+    assert_eq!(run.answer, "Done.");
+    let requests = first_model.requests();
+    let tools = &requests.first().expect("item 0").tools;
+    let handoff_tool = tools
+        .iter()
+        .find(|tool| tool.name == HANDOFF_TOOL)
+        .expect("the handoff tool");
+    assert!(
+        handoff_tool
+            .description
+            .contains("Answer directly yourself"),
+        "{}",
+        handoff_tool.description
+    );
+    assert!(
+        handoff_tool.description.contains("Do not hand back"),
+        "{}",
+        handoff_tool.description
+    );
+}
+
+#[tokio::test]
+async fn bouncing_is_not_stopped_unless_repetition_is_on() {
+    let (ping, _) = agent("ping", "", vec![handoff("pong", "1"), handoff("pong", "3")]);
+    let (pong, _) = agent("pong", "", vec![handoff("ping", "2"), handoff("ping", "4")]);
+    let swarm = Swarm::builder()
+        .agent(ping)
+        .agent(pong)
+        .max_handoffs(3)
+        .build()
+        .expect("the builder is valid");
+
+    let error = swarm.run("Task").await.unwrap_err();
+
+    assert!(
+        matches!(error.reason, SwarmFailure::MaxHandoffs { limit: 3 }),
+        "{error}"
+    );
+}
+
+#[tokio::test]
 async fn an_agent_failure_ends_the_run_with_the_trail() {
     let (first, _) = agent("first", "", vec![handoff("second", "Go")]);
     let (second, _) = agent("second", "", vec![MockTurn::error("model down")]);
