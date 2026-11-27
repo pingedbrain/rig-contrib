@@ -6,6 +6,4 @@
     clippy::unreachable
 )]
 
-#[cfg(feature = "aws")]
-mod aws;
 mod otel;
