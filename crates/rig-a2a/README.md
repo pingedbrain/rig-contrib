@@ -97,6 +97,10 @@ finishes (a refused call, a dropped connection) is an error, never an empty answ
 Both ways agents stream are understood: artifact chunks (Rig, most SDKs) and
 `working` status messages followed by a final artifact (Strands).
 
+A second client can attach to a running task with `tasks/resubscribe`
+(`A2AClient::subscribe_to_task`). It gets the task's updates from then on, and the
+stream ends when the task does.
+
 ## Serving: what comes back
 
 A plain agent answers with text, streamed, plus any image the model produced as a
@@ -186,6 +190,40 @@ async fn bounded(agent: Agent, url: &str, token: &str) -> Result<(), Box<dyn std
 }
 ```
 
+## Push notifications
+
+Off by default: the card says `pushNotifications: false`, and a config set is refused
+with `PushNotificationNotSupported`. Turn them on with `push_notifications(true)`. A
+client then sets a webhook for a task, on the send or with `tasks/pushNotificationConfig/set`,
+and the server POSTs each task update to it.
+
+```rust
+use rig_a2a::A2aServer;
+use rig_agent::Agent;
+
+/// Serve an agent with push notifications, for webhooks on one allowlisted host.
+fn serve_with_push(agent: Agent) -> A2aServer {
+    A2aServer::new(agent, "https://agent.example.com")
+        .push_notifications(true)
+        .push_allowed_hosts(["hooks.example.com"])
+}
+```
+
+A webhook URL comes from the client, so it is a server-side request forgery (SSRF)
+risk. With push on, the server:
+
+- refuses a webhook URL that is not `https`, when its config is saved;
+- refuses a host that is not on `push_allowed_hosts`, when that list is set (names
+  compare without regard to case);
+- refuses to POST to loopback, private and link-local addresses, including names that
+  resolve to them and redirects to them. The SDK does this check and it is on by default.
+
+Without an allowlist, any public host can be made to receive POSTs, so set one when
+clients are not trusted. `allow_insecure_push_urls()` drops the `https` requirement and
+the address check, for tests against a webhook on this machine; keep it off elsewhere.
+`push_config_store` keeps configs in your own store, and the same checks apply to it.
+The v0.3 card under `/v03` keeps `pushNotifications: false`.
+
 ## Tracing
 
 Each task runs in an `a2a.task` span (`a2a.task_id`, `a2a.context_id`, and `a2a.state`
@@ -221,7 +259,7 @@ default, as in Rig. Set it on the agent you serve with
 
 ## Not supported
 
-Push notifications (webhooks), the authenticated extended agent card, OAuth/OIDC
+The authenticated extended agent card, OAuth/OIDC
 schemes (bearer only; add your own Axum middleware for more), the gRPC binding, and
 files produced by tools (only the model's own images become file parts).
 

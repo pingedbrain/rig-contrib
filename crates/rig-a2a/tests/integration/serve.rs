@@ -21,13 +21,13 @@ use tokio::sync::Notify;
 type Client = A2AClient<Box<dyn Transport>>;
 
 /// A tool that signals `started` when called, then blocks until `release`.
-struct MockControlledTool {
+pub(super) struct MockControlledTool {
     started: Arc<Notify>,
     release: Arc<Notify>,
 }
 
 impl MockControlledTool {
-    fn new(started: Arc<Notify>, release: Arc<Notify>) -> Self {
+    pub(super) fn new(started: Arc<Notify>, release: Arc<Notify>) -> Self {
         Self { started, release }
     }
 }
@@ -54,7 +54,7 @@ impl Tool for MockControlledTool {
 }
 
 /// Serve `agent` on a free loopback port and return its base URL.
-async fn serve(agent: Agent) -> anyhow::Result<String> {
+pub(super) async fn serve(agent: Agent) -> anyhow::Result<String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let url = format!("http://{}", listener.local_addr()?);
     let app = A2aServer::new(agent, &url).into_router();
@@ -63,7 +63,7 @@ async fn serve(agent: Agent) -> anyhow::Result<String> {
 }
 
 /// A client of the agent at `url` over `binding`, chosen from its card.
-async fn connect(url: &str, binding: &str) -> anyhow::Result<Client> {
+pub(super) async fn connect(url: &str, binding: &str) -> anyhow::Result<Client> {
     let card = AgentCardResolver::new(None).resolve(url).await?;
     ensure!(card.name == "echo", "the card names the agent");
     let factory = A2AClientFactory::builder()
@@ -72,7 +72,7 @@ async fn connect(url: &str, binding: &str) -> anyhow::Result<Client> {
     Ok(factory.create_from_card(&card).await?)
 }
 
-fn request(text: &str, context_id: Option<&str>) -> SendMessageRequest {
+pub(super) fn request(text: &str, context_id: Option<&str>) -> SendMessageRequest {
     let mut message = Message::new(Role::User, vec![Part::text(text)]);
     message.context_id = context_id.map(str::to_owned);
     SendMessageRequest {
@@ -88,7 +88,7 @@ fn answer(task: &Task) -> Option<String> {
     Some(artifact.parts.iter().filter_map(Part::as_text).collect())
 }
 
-fn reply(chunks: &[&str]) -> Vec<MockStreamEvent> {
+pub(super) fn reply(chunks: &[&str]) -> Vec<MockStreamEvent> {
     chunks
         .iter()
         .map(|chunk| MockStreamEvent::text(*chunk))

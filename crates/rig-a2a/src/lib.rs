@@ -89,6 +89,8 @@ mod otel;
 #[cfg(not(target_family = "wasm"))]
 mod parts;
 #[cfg(not(target_family = "wasm"))]
+mod push;
+#[cfg(not(target_family = "wasm"))]
 mod server;
 #[cfg(not(target_family = "wasm"))]
 mod v03;

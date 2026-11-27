@@ -9,7 +9,9 @@ use a2a::{
 use a2a_server::agent_card::agent_card_router;
 use a2a_server::jsonrpc::jsonrpc_router;
 use a2a_server::rest::rest_router;
-use a2a_server::{DefaultRequestHandler, InMemoryTaskStore, StaticAgentCard, TaskStore};
+use a2a_server::{
+    DefaultRequestHandler, InMemoryTaskStore, PushConfigStore, StaticAgentCard, TaskStore,
+};
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
@@ -18,6 +20,7 @@ use rig_agent::Agent;
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 
 use crate::A2aExecutor;
+use crate::push::PushSettings;
 use crate::v03::{self, V03_PATH};
 
 /// The path of the JSON-RPC binding under the server's base URL.
@@ -30,7 +33,8 @@ pub const REST_PATH: &str = "/rest";
 ///
 /// The router serves the card at `/.well-known/agent-card.json`, the JSON-RPC
 /// binding at [`JSONRPC_PATH`] and the HTTP+JSON binding at [`REST_PATH`].
-/// Streaming is on; push notifications are off.
+/// Streaming is on. Push notifications are off unless
+/// [`push_notifications`](Self::push_notifications) turns them on.
 ///
 /// For peers still on A2A v0.3, the same agent is served under
 /// [`V03_PATH`](crate::V03_PATH): its v0.3 card at
@@ -43,6 +47,7 @@ pub struct A2aServer<S = InMemoryTaskStore> {
     url: String,
     bearer: Option<String>,
     max_request_bytes: usize,
+    push: PushSettings,
 }
 
 /// The largest request body a server reads by default: 2 MiB.
@@ -65,6 +70,7 @@ impl A2aServer {
             url,
             bearer: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            push: PushSettings::new(),
         }
     }
 
@@ -196,6 +202,69 @@ impl<S: TaskStore> A2aServer<S> {
         self
     }
 
+    /// Accept push notification configs, so a client can ask the server to
+    /// POST task updates to a webhook. Off by default. When on, the card
+    /// declares `pushNotifications: true`; when off, setting a config is
+    /// refused with `PushNotificationNotSupported`. The v0.3 card under
+    /// [`V03_PATH`](crate::V03_PATH) still declares `false`.
+    ///
+    /// Configs are kept in memory unless [`push_config_store`](Self::push_config_store)
+    /// is set. Every webhook URL is checked when its config is saved: it must
+    /// be `https`, and on the list from [`push_allowed_hosts`](Self::push_allowed_hosts)
+    /// if one is set. The SDK then refuses to POST to loopback, private and
+    /// link-local addresses, including names that resolve to them and
+    /// redirects to them.
+    ///
+    /// # Security
+    ///
+    /// A webhook URL comes from the client, so an open server with push on
+    /// lets any caller make it POST to any public host. Set an allowlist when
+    /// clients are not trusted. The bearer token is not sent to a webhook.
+    ///
+    /// ```ignore
+    /// let server = A2aServer::new(agent, "https://agent.example.com")
+    ///     .push_notifications(true)
+    ///     .push_allowed_hosts(["hooks.example.com"]);
+    /// ```
+    #[must_use]
+    pub fn push_notifications(mut self, enabled: bool) -> Self {
+        self.push.enabled = enabled;
+        self.card.capabilities.push_notifications = Some(enabled);
+        self
+    }
+
+    /// Keep push configs in `store` instead of in memory. Also turns push
+    /// notifications on, as [`push_notifications(true)`](Self::push_notifications)
+    /// does. Every config still goes through the URL checks.
+    #[must_use]
+    pub fn push_config_store<P: PushConfigStore>(mut self, store: P) -> Self {
+        self.push.store = Some(Arc::new(store));
+        self.push_notifications(true)
+    }
+
+    /// Accept webhook URLs only on these hosts, compared without regard to
+    /// case. A config naming another host is refused when it is saved. Takes
+    /// effect only while push notifications are on.
+    #[must_use]
+    pub fn push_allowed_hosts<I, H>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = H>,
+        H: Into<String>,
+    {
+        self.push.allowed_hosts = Some(hosts.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Accept `http://` webhook URLs and let the server POST to loopback and
+    /// private addresses. For tests against a webhook on this machine. It
+    /// turns off the checks described on [`push_notifications`](Self::push_notifications),
+    /// so do not use it on a server that faces other people.
+    #[must_use]
+    pub fn allow_insecure_push_urls(mut self) -> Self {
+        self.push.allow_insecure = true;
+        self
+    }
+
     /// Keep tasks in `store` instead of in memory.
     ///
     /// This replaces the default store, and with it any limit set by
@@ -210,6 +279,7 @@ impl<S: TaskStore> A2aServer<S> {
             url: self.url,
             bearer: self.bearer,
             max_request_bytes: self.max_request_bytes,
+            push: self.push,
         }
     }
 
@@ -220,11 +290,14 @@ impl<S: TaskStore> A2aServer<S> {
 
     /// The Axum router serving the card and both bindings.
     pub fn into_router(self) -> axum::Router {
-        let handler = Arc::new(
-            DefaultRequestHandler::new(self.executor, self.store)
-                .with_capabilities(self.card.capabilities.clone())
-                .with_default_input_modes(self.card.default_input_modes.clone()),
-        );
+        let mut handler = DefaultRequestHandler::new(self.executor, self.store)
+            .with_capabilities(self.card.capabilities.clone())
+            .with_default_input_modes(self.card.default_input_modes.clone());
+        if self.push.enabled {
+            handler =
+                handler.with_push_notifications(self.push.checked_store(), self.push.sender());
+        }
+        let handler = Arc::new(handler);
         let v03_card = v03::card(
             &self.card,
             &format!("{}{V03_PATH}", self.url),

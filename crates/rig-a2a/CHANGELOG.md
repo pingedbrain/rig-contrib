@@ -4,6 +4,9 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Added push notifications, off by default. `A2aServer::push_notifications(true)` turns them on and the card declares `pushNotifications: true`; `push_config_store(store)` also turns them on; `push_allowed_hosts(hosts)` only limits them. Webhook URLs must be `https` and, if an allowlist is set, on it; the SDK refuses private, loopback and link-local targets, including through DNS and redirects. `allow_insecure_push_urls()` is for local tests only. With push off, a config set is refused with `PushNotificationNotSupported`, as before.
+- Added a test that a second client resubscribes to a running task (`tasks/resubscribe`); it passes with no code change.
+- rig-a2a now depends on `async-trait` directly (it was optional under `otel`).
 - Docs: the front page and README show calling a remote agent directly (`RemoteAgent::send`) and as a tool, and where content recording is set.
 - Agents that hit their turn limit now say how to raise it: the failed task names `AgentBuilder::default_max_turns(n)`. Error variants and statuses are unchanged.
 - Example `serve` is renamed `a2a_serve`: it clashed with the `serve` example of rig-agentcore. Run it with `cargo run --example a2a_serve`.

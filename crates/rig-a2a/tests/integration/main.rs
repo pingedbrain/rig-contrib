@@ -6,6 +6,7 @@ mod history;
 mod limits;
 mod max_turns;
 mod otel;
+mod push;
 mod rich_stream;
 mod serve;
 mod tracing;

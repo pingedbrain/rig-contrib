@@ -14,7 +14,7 @@ description = "Serve Rig agents over the Agent2Agent (A2A) protocol and call rem
 [features]
 # W3C trace context and sessions across agents: a call to a remote agent and
 # the task it starts make one OpenTelemetry trace.
-otel = ["dep:rig-otel", "dep:async-trait"]
+otel = ["dep:rig-otel"]
 
 # A2A serving is native-only: the SDK's server runs on tokio and axum.
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
@@ -38,7 +38,7 @@ thiserror = "2"
 tracing = "0.1"
 tower-http = { version = "0.6", features = ["limit"] }
 rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false, optional = true }
-async-trait = { version = "0.1", optional = true }
+async-trait = "0.1"
 
 [dev-dependencies]
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
