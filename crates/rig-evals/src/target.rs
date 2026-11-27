@@ -2,6 +2,7 @@
 //! `multiagent` feature, swarms and graphs.
 
 use std::future::Future;
+use std::time::Duration;
 
 use rig_agent::Agent;
 use rig_core::completion::Usage;
@@ -14,6 +15,35 @@ use crate::Case;
 
 /// Why a target run failed: a boxed error, `Send + Sync` except on wasm.
 pub type TargetError = rig_core::error::BoxError;
+
+/// When a trial ends and the limit it was set from, for the target run of an
+/// experiment with a [`trial_timeout`](crate::Experiment::trial_timeout).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Deadline {
+    pub(crate) at: tokio::time::Instant,
+    pub(crate) limit: Duration,
+}
+
+tokio::task_local! {
+    /// The deadline of the trial whose target run this is, `None` when the
+    /// trial has no timeout. An agent target stops each turn at it, so a
+    /// timed-out run keeps its completed turns. Every target run sets it, so
+    /// a run nested in another never inherits the outer deadline.
+    pub(crate) static TRIAL_DEADLINE: Option<Deadline>;
+}
+
+/// The deadline `limit` from now, or `None` when that overflows the clock
+/// (such as `Duration::MAX`): such a limit is no limit.
+pub(crate) fn deadline_in(limit: Duration) -> Option<Deadline> {
+    tokio::time::Instant::now()
+        .checked_add(limit)
+        .map(|at| Deadline { at, limit })
+}
+
+/// The explanation of a call that outlived `limit`.
+pub(crate) fn timeout_message(limit: Duration) -> String {
+    format!("timed out after {}s", limit.as_secs_f64())
+}
 
 /// The longest tool result kept, in bytes; a longer one is cut at a char
 /// boundary and marked `[truncated]`.
@@ -248,6 +278,7 @@ impl Target for Agent {
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
             let multi = !case.turns.is_empty();
+            let deadline = TRIAL_DEADLINE.try_with(|deadline| *deadline).ok().flatten();
             // A multi-turn case carries its own history, starting empty, so
             // it does not pick up the agent's memory store; a single-turn
             // case runs as before.
@@ -258,11 +289,18 @@ impl Target for Agent {
                 if multi {
                     run = run.history(history.iter().cloned());
                 }
-                let response = match run.run().await {
+                // Under a trial deadline the turn stops at it, while the
+                // completed turns are still in hand.
+                let outcome: Result<_, TargetError> = match deadline {
+                    Some(deadline) => match tokio::time::timeout_at(deadline.at, run.run()).await {
+                        Ok(result) => result.map_err(Into::into),
+                        Err(_) => Err(timeout_message(deadline.limit).into()),
+                    },
+                    None => run.run().await.map_err(Into::into),
+                };
+                let response = match outcome {
                     Ok(response) => response,
-                    Err(error) => {
-                        return Err(turn_error(multi, number + 1, output, error.into()));
-                    }
+                    Err(error) => return Err(turn_error(multi, number + 1, output, error)),
                 };
                 output.tool_calls.extend(tool_calls_of(&response.messages));
                 output.usage += response.usage;
