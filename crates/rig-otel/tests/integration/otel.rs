@@ -65,6 +65,7 @@ struct Captured {
 
 /// Run `body` under telemetry exporting to memory, then flush.
 async fn capture<F: Future<Output = ()>>(body: impl FnOnce() -> F) -> Captured {
+    crate::pin_global_default();
     let spans = InMemorySpanExporter::default();
     let metrics = InMemoryMetricExporterBuilder::new()
         .with_temporality(Temporality::Cumulative)

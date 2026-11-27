@@ -26,6 +26,7 @@ fn traceparent() -> String {
 async fn capture<F: Future<Output = anyhow::Result<()>>>(
     body: impl FnOnce() -> F,
 ) -> anyhow::Result<Vec<SpanData>> {
+    crate::pin_global_default();
     let spans = InMemorySpanExporter::default();
     let (telemetry, subscriber) = rig_otel::Telemetry::builder()
         .span_exporter(spans.clone())
