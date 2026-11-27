@@ -23,13 +23,13 @@ fn setup() -> Result<rig_otel::Telemetry, rig_otel::InitError> {
     rig_otel::init()
 }
 
-// A conversation: every span under it carries session.id.
+// A conversation: the agent run and every span under it carry session.id.
 async fn converse(
     agent: Agent,
     session_id: String,
     message: String,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    let span = tracing::info_span!("conversation");
+    let span = rig_otel::agent_span(agent.name().unwrap_or("agent"));
     rig_otel::set_session(&span, session_id, None)?;
     let answer = async { agent.prompt(message).await }.instrument(span).await?;
     Ok(answer.to_string())
@@ -46,6 +46,14 @@ fn serve_call(span: &tracing::Span, request: &http::Request<()>) -> Result<(), t
     span.set_parent(rig_otel::extract(request.headers()))
 }
 ```
+
+Use `agent_span` for the outer span of a run, as above. It is named `invoke_agent <agent>`
+and carries `gen_ai.operation.name = invoke_agent` and `gen_ai.agent.name`, which is what
+GenAI backends look for. Rig creates its own `invoke_agent` span only when no span is
+enabled around the run. Inside an enabled outer span, such as `info_span!("conversation")`,
+Rig adopts that span as the run's, so no `invoke_agent` span is exported. With `agent_span`
+the run's span is `invoke_agent`, but Rig does not record the run's prompt, answer or usage
+on it.
 
 `init()` exports to the endpoint in `OTEL_EXPORTER_OTLP_ENDPOINT`, or to the OTLP HTTP
 default `http://localhost:4318` when that is unset. Starting without a collector does not

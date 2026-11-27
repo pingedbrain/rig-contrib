@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `agent_span(name)`: the outer span of an agent run, named `invoke_agent <name>` with `gen_ai.operation.name` `invoke_agent` and `gen_ai.agent.name`. Rig adopts an enabled outer span as the run's span, so a bare `conversation` span exported no `invoke_agent` span. The README and the `console` example use it now, with `set_session`.
 - An `OTEL_EXPORTER_OTLP_ENDPOINT` (or traces or metrics endpoint) value that is not an `http` or `https` URL with a host is reported as a warning at setup, naming the variable and the value. Setup still succeeds, as before.
 - Failed exports are logged as warnings naming the signal and the endpoint, at most once a minute per exporter, with a count of the failures skipped. They reach stderr with `RUST_LOG` set. The README has a "No traces showing up?" list.
 - The CloudWatch exporters (`aws_cloudwatch`) time out: 10 s per request by default, set by `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` / `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds; zero is ignored), with a 5 s connect timeout. A hung endpoint no longer stalls the batch exporter or shutdown. If the HTTP client cannot be built, the cause is logged and `AwsError` reports the unit variant `HttpClient`.

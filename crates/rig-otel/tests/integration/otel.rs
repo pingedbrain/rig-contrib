@@ -268,6 +268,53 @@ async fn a_trace_and_its_session_cross_into_another_process() {
 }
 
 #[tokio::test]
+async fn an_agent_span_is_the_exported_invoke_agent_run_with_the_session() {
+    let captured = capture(|| async {
+        let span = rig_otel::agent_span("calculator");
+        rig_otel::set_session(&span, "session-9", None).unwrap();
+        run_agent().instrument(span).await;
+    })
+    .await;
+
+    // The outer span is the run's: exactly one invoke_agent, named as
+    // AgentCore and GenAI backends name a run, carrying the session.
+    let runs: Vec<&SpanData> = captured
+        .spans
+        .iter()
+        .filter(|span| operation(span).as_deref() == Some("invoke_agent"))
+        .collect();
+    assert_eq!(
+        runs.len(),
+        1,
+        "{:?}",
+        captured.spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    let run = runs[0];
+    assert_eq!(run.name, "invoke_agent calculator");
+    assert_eq!(
+        attribute(run, "gen_ai.agent.name")
+            .map(Value::to_string)
+            .as_deref(),
+        Some("calculator")
+    );
+    // Every span under it, the two model calls and the tool call, is in the session.
+    assert_eq!(
+        captured.spans.len(),
+        4,
+        "{:?}",
+        captured.spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+    for span in &captured.spans {
+        assert_eq!(
+            attribute(span, SESSION_ID).map(Value::to_string).as_deref(),
+            Some("session-9"),
+            "{}",
+            span.name
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_session_keeps_the_rest_of_the_callers_baggage() {
     let mut headers = http::HeaderMap::new();
     headers.insert(
