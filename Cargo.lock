@@ -2647,6 +2647,7 @@ dependencies = [
 name = "rig-agentcore"
 version = "0.47.2"
 dependencies = [
+ "anyhow",
  "axum",
  "futures",
  "opentelemetry",
