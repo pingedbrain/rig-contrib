@@ -24,11 +24,12 @@ tokio = { version = "1.54.1", features = ["net", "rt", "sync", "macros", "signal
 tracing = "0.1"
 
 [dev-dependencies]
+anyhow = "1"
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
-rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
 tokio = { version = "1.54.1", features = ["full"] }
 
 [lints]

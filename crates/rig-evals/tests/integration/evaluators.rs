@@ -284,3 +284,20 @@ async fn no_error_and_every_built_in_fail_a_failed_target() {
         .passed
     );
 }
+
+#[tokio::test]
+async fn a_missing_reference_is_not_applicable_when_asked() {
+    let equals = evaluators::equals().not_applicable_without_reference();
+    let skipped = score(&equals, &case(), &answer("Paris")).await;
+    assert!(skipped.not_applicable);
+    assert!(!skipped.passed);
+    assert_eq!(skipped.label.as_deref(), Some("n/a"));
+
+    let exact = evaluators::trajectory(TrajectoryMode::Exact).not_applicable_without_reference();
+    let skipped = score(&exact, &case(), &called(&[])).await;
+    assert!(skipped.not_applicable);
+
+    // With the reference present, the evaluator scores as usual.
+    let scored = score(&equals, &case().expected("Paris"), &answer("Paris")).await;
+    assert!(scored.passed && !scored.not_applicable);
+}

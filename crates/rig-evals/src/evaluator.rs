@@ -1,6 +1,7 @@
 //! Scoring a run.
 
 use rig_agent::completion::StructuredOutputError;
+use rig_core::completion::Usage;
 use rig_core::error::BoxError;
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,19 @@ pub struct Score {
     /// Why, in words.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
+    /// Whether the evaluator could not apply to this run, such as a
+    /// reference the case lacks. Such a score is shown as N/A and left out
+    /// of pass rates and means; `passed` is false.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub not_applicable: bool,
+    /// The model tokens the evaluator spent, when it called a model (an
+    /// [`LlmJudge`](crate::LlmJudge)'s). The report adds them to its totals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 impl Score {
@@ -36,6 +50,19 @@ impl Score {
             passed,
             label: None,
             explanation: None,
+            not_applicable: false,
+            usage: None,
+        }
+    }
+
+    /// Not applicable to the run, with why: shown as N/A and left out of
+    /// pass rates and means.
+    pub fn not_applicable(evaluator: impl Into<String>, explanation: impl Into<String>) -> Self {
+        Self {
+            not_applicable: true,
+            ..Self::new(evaluator, 0.0, false)
+                .with_label("n/a")
+                .with_explanation(explanation)
         }
     }
 
@@ -62,6 +89,13 @@ impl Score {
         self.explanation = Some(explanation.into());
         self
     }
+
+    /// Record the model tokens the evaluation spent.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Usage) -> Self {
+        self.usage = Some(usage);
+        self
+    }
 }
 
 /// `value` within 0..=1; `NaN` is 0.
@@ -86,7 +120,8 @@ pub enum EvalError {
         /// The missing field: `expected` or `trajectory`.
         field: &'static str,
     },
-    /// The judge model did not return a verdict.
+    /// The judge model did not return a verdict. `LlmJudge` reports this as
+    /// a failed score labelled `error` (keeping the tokens it spent) instead.
     #[error("the judge returned no verdict: {0}")]
     Judge(#[from] StructuredOutputError),
     /// Any other failure, such as a remote evaluator's.
