@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use rig_agent::Agent;
 use rig_core::conversation::pairing::safe_start;
-use rig_core::message::Message;
+use rig_core::message::{Message, UserContent};
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use rig_memory::recent::{Recent, view};
 use rig_memory::{
@@ -286,6 +286,51 @@ enum SummarizeError {
     Store(String),
     #[error("the conversation changed while it was summarized")]
     Changed,
+}
+
+/// A probe summary whose text marks where the summary text falls in its frame.
+const PROBE: &str = "\u{1}";
+
+/// The text every summary message opens with: rig-memory's frame, before the summary.
+fn summary_opening() -> String {
+    SummaryState {
+        summary: PROBE.to_owned(),
+        ..SummaryState::default()
+    }
+    .message()
+    .unwrap_or_default()
+    .split(PROBE)
+    .next()
+    .unwrap_or_default()
+    .to_owned()
+}
+
+/// Whether `message` is a summary this module wrote (or rig-memory's splice did).
+pub(crate) fn is_summary(message: &Message) -> bool {
+    let Message::User { content } = message else {
+        return false;
+    };
+    let opening = summary_opening();
+    matches!(
+        content.first(),
+        Some(UserContent::Text(text)) if text.text.starts_with(&opening)
+    )
+}
+
+/// What a session keeps when a summarizer is set: the window's messages, and
+/// at least the newest `floor` messages, so a summarizer that keeps failing
+/// cannot grow a session without bound.
+pub(crate) struct Retained<'a> {
+    pub(crate) window: &'a dyn Recent,
+    pub(crate) floor: usize,
+}
+
+impl Recent for Retained<'_> {
+    fn start(&self, messages: &[Arc<Message>]) -> usize {
+        self.window
+            .start(messages)
+            .min(messages.len().saturating_sub(self.floor))
+    }
 }
 
 /// The request text for a summary of `read`, the messages it replaces.

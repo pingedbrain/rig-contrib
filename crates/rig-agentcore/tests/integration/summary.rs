@@ -7,6 +7,7 @@ use rig_agent::test_utils::MockAddTool;
 use rig_agentcore::{AgentCoreApp, SESSION_HEADER};
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
 use rig_memory::DirStore;
+use rig_memory::recent::LastMessages;
 use serde_json::{Value, json};
 
 async fn serve(app: AgentCoreApp) -> String {
@@ -204,4 +205,60 @@ async fn a_summary_survives_a_restart_with_a_store() {
     let request = last_sent(&later_model);
     assert!(request.contains("SUMMARY-STORED"));
     assert!(!request.contains("question 1"));
+}
+
+#[tokio::test]
+async fn the_summary_is_sent_first_even_when_the_window_is_narrower() {
+    let main =
+        MockCompletionModel::from_turns((1..=4).map(|n| MockTurn::text(format!("answer {n}"))));
+    let summarizer = MockCompletionModel::from_turns([MockTurn::text("SUMMARY-NARROW")]);
+    let app = AgentCoreApp::new(AgentBuilder::new(main.clone()).build())
+        .summarize_history(AgentBuilder::new(summarizer.clone()).build(), 2, 4)
+        .history_window(LastMessages(1));
+    let url = serve(app).await;
+    for question in 1..=4 {
+        invoke(&url, "session-1", &format!("question {question}")).await;
+    }
+    assert_eq!(summarizer.request_count(), 1);
+
+    // The window keeps one message, the newest answer; the summary is sent
+    // before it anyway.
+    let request = sent(&main, 3);
+    let summary = request.find("SUMMARY-NARROW").expect("the summary is sent");
+    let answer = request
+        .find("answer 3")
+        .expect("the newest kept message is sent");
+    assert!(summary < answer, "the summary comes first");
+    assert!(!request.contains("question 3"));
+}
+
+#[tokio::test]
+async fn a_failing_summarizer_does_not_grow_the_session_without_bound() {
+    let main =
+        MockCompletionModel::from_turns((1..=8).map(|n| MockTurn::text(format!("answer {n}"))));
+    let summarizer =
+        MockCompletionModel::from_turns((0..8).map(|_| MockTurn::error("summarizer down")));
+    let app = AgentCoreApp::new(AgentBuilder::new(main.clone()).build())
+        .summarize_history(AgentBuilder::new(summarizer.clone()).build(), 1, 2)
+        .history_window(LastMessages(1));
+    let url = serve(app).await;
+    for question in 1..=8 {
+        let reply: Value = invoke(&url, "session-1", &format!("question {question}"))
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            reply.get("response"),
+            Some(&json!(format!("answer {question}")))
+        );
+    }
+
+    // The window sends one message and the prompt. The session keeps its newest
+    // 2 * trigger messages (4), so the last summary attempt (the sixth) read
+    // only the older two of them and the one kept before the newest.
+    assert_eq!(sent(&main, 7).matches("\"role\"").count(), 2);
+    let attempted = sent(&summarizer, 5);
+    assert!(attempted.contains("question 6") && attempted.contains("question 7"));
+    assert!(!attempted.contains("question 5") && !attempted.contains("question 1"));
 }

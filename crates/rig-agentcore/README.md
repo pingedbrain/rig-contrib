@@ -52,10 +52,13 @@ rig_agentcore::AgentCoreApp::new(agent)
   (its compaction is a planning API the caller drives), so this option is built on its
   compaction helpers.
 
-  ```rust,no_run
-  # fn app(agent: rig_agent::Agent, summarizer: rig_agent::Agent) -> rig_agentcore::AgentCoreApp {
-  rig_agentcore::AgentCoreApp::new(agent).summarize_history(summarizer, 20, 60)
-  # }
+  ```rust
+  use rig_agent::Agent;
+  use rig_agentcore::AgentCoreApp;
+
+  fn app(agent: Agent, summarizer: Agent) -> AgentCoreApp {
+      AgentCoreApp::new(agent).summarize_history(summarizer, 20, 60)
+  }
   ```
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
