@@ -4,6 +4,12 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- `AgentCoreApp::spawn_task(future)` runs background work on Tokio, and `AgentCoreApp::track_task()`
+  returns a `BusyGuard` for work the app runs itself. While either is open, `/ping` answers
+  `HealthyBusy`, so AgentCore Runtime keeps the session running. The status returns to `Healthy`
+  when the work ends, including when its task is aborted.
+- `/ping` adds `time_of_last_update` (Unix seconds), which moves only when the status changes, as
+  AgentCore's HTTP contract asks. An idle app still answers `Healthy` with the same `status` field.
 - README snippets are compile-checked as doctests, so the examples cannot rot.
 - `AgentCoreApp::summarize_history(summarizer, keep_recent, trigger_messages)`: opt-in. Past
   `trigger_messages`, a session's older messages become one summary, its first message: a user
@@ -16,6 +22,14 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
   `2 * trigger_messages` messages, or what the window keeps if that is more. Built on
   rig-memory's compaction helpers, as rig-memory has no summarizing window. In a session
   this option summarizes, a first message that opens with the frame text is taken as the summary.
+- `AgentCoreApp::max_concurrent_tasks(n)`: opt-in cap on invocations running at once. Past
+  it, an invocation gets 429 Too Many Requests before the agent runs. No cap by default.
+- `AgentCoreApp::max_run_duration(d)`: opt-in limit on one invocation, summarizing included.
+  Past it, the run is stopped and answers 504 Gateway Timeout (or an `{"error"}` event when
+  streaming), and its turn is not added to the session. No limit by default.
+- `AgentCoreApp::max_request_bytes(n)`, with `DEFAULT_MAX_REQUEST_BYTES` (2 MB): an
+  `/invocations` body over the limit gets 413 Payload Too Large with the JSON error, where it
+  got 400 before. The default keeps the limit already in place.
 
 ## 0.47.3 (2026-11-27)
 

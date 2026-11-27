@@ -16,15 +16,19 @@ use rig_core::tool::{DynamicTool, Tool, ToolExecutionError, ToolOutput, tool_def
 use rig_memory::AsyncStore;
 use rig_memory::recent::{Recent, TokenBudget, view};
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
-    InitializeResult, JsonObject, ListToolsResult, PaginatedRequestParams,
-    ProgressNotificationParam, ServerCapabilities, ServerConfig, ToolAnnotations,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptRequestParams,
+    GetPromptResponse, GetPromptResult, Implementation, InitializeResult, JsonObject,
+    ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ProgressNotificationParam, Prompt, PromptArgument, PromptMessage, PromptsCapability,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ResourcesCapability, ServerCapabilities, ServerConfig, ToolAnnotations,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use crate::catalog::{Render, StaticPrompt, StaticResource};
 use crate::content::{image_blocks, tool_result};
 use crate::history::{
     DEFAULT_HISTORY_TOKENS, DEFAULT_MAX_CONTEXTS, HistoryStore, InMemory, Persistent,
@@ -67,6 +71,8 @@ pub struct McpServer {
     version: String,
     instructions: Option<String>,
     tools: Vec<Entry>,
+    resources: Vec<StaticResource>,
+    prompts: Vec<StaticPrompt>,
     history: Arc<dyn HistoryStore>,
     window: Arc<dyn Recent>,
     slots: Arc<tokio::sync::Semaphore>,
@@ -94,6 +100,8 @@ impl McpServer {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             instructions: None,
             tools: Vec::new(),
+            resources: Vec::new(),
+            prompts: Vec::new(),
             history: Arc::new(InMemory::new(DEFAULT_MAX_CONTEXTS)),
             window: Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
             slots: Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONCURRENT_CALLS)),
@@ -266,6 +274,108 @@ impl McpServer {
         self
     }
 
+    /// Offer a text resource at `uri`, read with `resources/read`. `mime_type`
+    /// tells the client what the text is, such as `text/markdown`.
+    ///
+    /// Another resource with the same URI makes serving fail with
+    /// [`BuildError::DuplicateResource`]. Only fixed contents are offered: no
+    /// subscriptions, no list-changed notifications, no resource templates.
+    #[must_use]
+    pub fn resource(
+        self,
+        uri: impl Into<String>,
+        name: impl Into<String>,
+        mime_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
+        let uri = uri.into();
+        let mime_type = mime_type.into();
+        let resource = Resource::new(uri.clone(), name).with_mime_type(mime_type.clone());
+        let contents = ResourceContents::TextResourceContents {
+            uri,
+            mime_type: Some(mime_type),
+            text: text.into(),
+            meta: None,
+        };
+        self.add_resource(StaticResource { resource, contents })
+    }
+
+    /// Offer a binary resource at `uri`. The bytes travel base64-encoded in
+    /// the `resources/read` result, labelled with `mime_type`.
+    ///
+    /// Another resource with the same URI makes serving fail with
+    /// [`BuildError::DuplicateResource`].
+    #[must_use]
+    pub fn binary_resource(
+        self,
+        uri: impl Into<String>,
+        name: impl Into<String>,
+        mime_type: impl Into<String>,
+        bytes: impl AsRef<[u8]>,
+    ) -> Self {
+        use base64::Engine;
+
+        let uri = uri.into();
+        let mime_type = mime_type.into();
+        let resource = Resource::new(uri.clone(), name).with_mime_type(mime_type.clone());
+        let contents = ResourceContents::BlobResourceContents {
+            uri,
+            mime_type: Some(mime_type),
+            blob: base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
+            meta: None,
+        };
+        self.add_resource(StaticResource { resource, contents })
+    }
+
+    /// Offer a prompt named `name`. Its `arguments` are listed to the client;
+    /// a call to `prompts/get` without a required one is refused with an
+    /// invalid-params error. `render` turns the arguments the client passed
+    /// (all strings, keyed by name) into the prompt's messages.
+    ///
+    /// Another prompt with the same name makes serving fail with
+    /// [`BuildError::DuplicatePrompt`]. Prompts are fixed: no list-changed
+    /// notifications and no completion for their arguments.
+    ///
+    /// ```no_run
+    /// use std::collections::HashMap;
+    /// use rig_mcp_server::{McpServer, rmcp::model::{PromptArgument, PromptMessage, Role}};
+    ///
+    /// let server = McpServer::new("docs").prompt(
+    ///     "explain",
+    ///     "Explain a topic for a reader.",
+    ///     vec![PromptArgument::new("topic").with_required(true)],
+    ///     |args: &HashMap<String, String>| {
+    ///         let topic = args.get("topic").map_or("", String::as_str);
+    ///         vec![PromptMessage::new_text(Role::User, format!("Explain {topic} in plain words."))]
+    ///     },
+    /// );
+    /// ```
+    #[must_use]
+    pub fn prompt<F>(
+        self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        arguments: Vec<PromptArgument>,
+        render: F,
+    ) -> Self
+    where
+        F: Fn(&HashMap<String, String>) -> Vec<PromptMessage> + Send + Sync + 'static,
+    {
+        let prompt = Prompt::new(name, Some(description), Some(arguments));
+        let render: Render = Arc::new(render);
+        self.add_prompt(StaticPrompt { prompt, render })
+    }
+
+    fn add_resource(mut self, resource: StaticResource) -> Self {
+        self.resources.push(resource);
+        self
+    }
+
+    fn add_prompt(mut self, prompt: StaticPrompt) -> Self {
+        self.prompts.push(prompt);
+        self
+    }
+
     fn add_tool(self, definition: rig_core::completion::ToolDefinition, run: RunTool) -> Self {
         let mut tool = rmcp::model::Tool::new(
             definition.name.to_string(),
@@ -300,6 +410,14 @@ pub enum BuildError {
     /// a client could not tell which one it calls.
     #[error("two tools are named `{0}`")]
     DuplicateTool(String),
+    /// Two resources have the same URI, so a client could not tell which one
+    /// it reads.
+    #[error("two resources have the URI `{0}`")]
+    DuplicateResource(String),
+    /// Two prompts have the same name, so a client could not tell which one
+    /// it gets.
+    #[error("two prompts are named `{0}`")]
+    DuplicatePrompt(String),
 }
 
 /// The server as an MCP handler, shared by every connection.
@@ -312,7 +430,8 @@ struct Inner {
 }
 
 impl Handler {
-    /// The handler of `server`, refused when two of its tools share a name.
+    /// The handler of `server`, refused when two of its tools share a name, two
+    /// resources a URI, or two prompts a name.
     pub(crate) fn new(server: McpServer) -> Result<Self, BuildError> {
         let mut by_name = HashMap::with_capacity(server.tools.len());
         for (index, entry) in server.tools.iter().enumerate() {
@@ -321,6 +440,20 @@ impl Handler {
                 return Err(BuildError::DuplicateTool(name));
             }
             by_name.insert(name, index);
+        }
+        let mut uris = std::collections::HashSet::with_capacity(server.resources.len());
+        for resource in &server.resources {
+            let uri = &resource.resource.uri;
+            if !uris.insert(uri.clone()) {
+                return Err(BuildError::DuplicateResource(uri.clone()));
+            }
+        }
+        let mut names = std::collections::HashSet::with_capacity(server.prompts.len());
+        for prompt in &server.prompts {
+            let name = &prompt.prompt.name;
+            if !names.insert(name.clone()) {
+                return Err(BuildError::DuplicatePrompt(name.clone()));
+            }
         }
         Ok(Self(Arc::new(Inner { server, by_name })))
     }
@@ -334,15 +467,116 @@ impl Handler {
 impl ServerHandler for Handler {
     fn get_info(&self) -> ServerConfig {
         let server = &self.0.server;
-        let mut info = InitializeResult::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::new(
-                server.name.clone(),
-                server.version.clone(),
-            ));
+        // Resources and prompts are advertised only when there are some, so a
+        // server without them answers `initialize` as it always did.
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        if !server.resources.is_empty() {
+            capabilities.resources = Some(ResourcesCapability::default());
+        }
+        if !server.prompts.is_empty() {
+            capabilities.prompts = Some(PromptsCapability::default());
+        }
+        let mut info = InitializeResult::new(capabilities).with_server_info(Implementation::new(
+            server.name.clone(),
+            server.version.clone(),
+        ));
         if let Some(instructions) = &server.instructions {
             info = info.with_instructions(instructions.clone());
         }
         info
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            resources: self
+                .0
+                .server
+                .resources
+                .iter()
+                .map(|entry| entry.resource.clone())
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        let entry = self
+            .0
+            .server
+            .resources
+            .iter()
+            .find(|entry| entry.resource.uri == request.uri)
+            .ok_or_else(|| {
+                McpError::resource_not_found(format!("no resource at `{}`", request.uri), None)
+            })?;
+        Ok(ReadResourceResponse::Complete(ReadResourceResult::new(
+            vec![entry.contents.clone()],
+        )))
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult {
+            prompts: self
+                .0
+                .server
+                .prompts
+                .iter()
+                .map(|entry| entry.prompt.clone())
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
+        let entry = self
+            .0
+            .server
+            .prompts
+            .iter()
+            .find(|entry| entry.prompt.name == request.name)
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("no prompt named `{}`", request.name), None)
+            })?;
+        let mut arguments = HashMap::new();
+        for (name, value) in request.arguments.unwrap_or_default() {
+            let Value::String(text) = value else {
+                return Err(McpError::invalid_params(
+                    format!("argument `{name}` must be a string"),
+                    None,
+                ));
+            };
+            arguments.insert(name, text);
+        }
+        for declared in entry.prompt.arguments.iter().flatten() {
+            if declared.required == Some(true) && !arguments.contains_key(&declared.name) {
+                return Err(McpError::invalid_params(
+                    format!("missing required argument `{}`", declared.name),
+                    None,
+                ));
+            }
+        }
+        let messages = (entry.render)(&arguments);
+        let mut result = GetPromptResult::new(messages);
+        if let Some(description) = &entry.prompt.description {
+            result = result.with_description(description.clone());
+        }
+        Ok(GetPromptResponse::Complete(result))
     }
 
     async fn list_tools(

@@ -1,5 +1,6 @@
 //! Nodes run along edges, in parallel where they can.
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -291,6 +292,57 @@ fn has_cycle(nodes: usize, edges: &[Edge]) -> bool {
     peeled < nodes
 }
 
+/// Request-scoped values a run is given when it starts: a user id, a tenant,
+/// a database handle. Nodes, [`edge_if`](GraphBuilder::edge_if) conditions
+/// and [`node_fn_with_state`](crate::node_fn_with_state) functions read them
+/// through [`GraphState::run_state`] or [`NodeIo::run_state`](crate::NodeIo::run_state).
+///
+/// Values are typed: one value per type, read back by type. They are never
+/// sent to a model: an agent node gets only its input text, and the tools of
+/// an agent cannot read them (Rig gives a tool only the serializable
+/// `ToolContext`). They are not saved in checkpoints either, so a run resumed
+/// with [`run_as_with_state`](Graph::run_as_with_state) or
+/// [`stream_as_with_state`](Graph::stream_as_with_state) must be given the
+/// state again.
+///
+/// ```
+/// use rig_multiagent::RunState;
+/// struct TenantId(String);
+/// let state = RunState::new().with(TenantId("acme".to_owned()));
+/// assert_eq!(state.get::<TenantId>().map(|tenant| tenant.0.as_str()), Some("acme"));
+/// ```
+#[derive(Clone, Default)]
+pub struct RunState {
+    values: Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl RunState {
+    /// An empty state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Store `value`, replacing an earlier value of the same type.
+    #[must_use]
+    pub fn with<T: Any + Send + Sync>(mut self, value: T) -> Self {
+        Arc::make_mut(&mut self.values).insert(TypeId::of::<T>(), Arc::new(value));
+        self
+    }
+
+    /// The stored value of type `T`, if there is one.
+    pub fn get<T: Any + Send + Sync>(&self) -> Option<&T> {
+        let value: &(dyn Any + Send + Sync) = self.values.get(&TypeId::of::<T>())?.as_ref();
+        value.downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for RunState {
+    /// Shows how many values there are, never the values themselves.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RunState({} values)", self.values.len())
+    }
+}
+
 /// A run so far, as edge conditions see it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GraphState {
@@ -301,12 +353,20 @@ pub struct GraphState {
     #[serde(default)]
     finished: HashMap<String, usize>,
     order: Vec<String>,
+    /// The request-scoped state the run was given. Never saved.
+    #[serde(skip)]
+    run: RunState,
 }
 
 impl GraphState {
     /// The task the run started with.
     pub fn task(&self) -> &str {
         &self.task
+    }
+
+    /// The request-scoped state the run was given, see [`RunState`].
+    pub fn run_state(&self) -> &RunState {
+        &self.run
     }
 
     /// The newest output of node `id`, once it has finished.
@@ -552,9 +612,20 @@ impl GraphFailure {
 impl Graph {
     /// Run the graph on `task`.
     pub async fn run(&self, task: impl Into<String>) -> Result<GraphRun, GraphError> {
+        self.run_with_state(task, RunState::default()).await
+    }
+
+    /// [`run`](Self::run) with the request-scoped `state` every node, edge
+    /// condition and [`node_fn_with_state`](crate::node_fn_with_state)
+    /// function of the run can read. See [`RunState`].
+    pub async fn run_with_state(
+        &self,
+        task: impl Into<String>,
+        state: RunState,
+    ) -> Result<GraphRun, GraphError> {
         let span = run_span(None);
         let outcome = self
-            .run_task(task.into(), None, false, None)
+            .run_task(task.into(), None, false, None, state)
             .instrument(span.clone())
             .await;
         record_outcome(&span, &outcome);
@@ -578,9 +649,22 @@ impl Graph {
         run_id: &str,
         task: impl Into<String>,
     ) -> Result<GraphRun, GraphError> {
+        self.run_as_with_state(run_id, task, RunState::default())
+            .await
+    }
+
+    /// [`run_as`](Self::run_as) with the request-scoped `state` of the run.
+    /// A resumed run needs the state passed again: it is not in the
+    /// checkpoint. See [`RunState`].
+    pub async fn run_as_with_state(
+        &self,
+        run_id: &str,
+        task: impl Into<String>,
+        state: RunState,
+    ) -> Result<GraphRun, GraphError> {
         let span = run_span(Some(run_id));
         let outcome = self
-            .run_task(task.into(), self.saving(Some(run_id)), false, None)
+            .run_task(task.into(), self.saving(Some(run_id)), false, None, state)
             .instrument(span.clone())
             .await;
         record_outcome(&span, &outcome);
@@ -595,7 +679,18 @@ impl Graph {
         run_id: &'a str,
         task: impl Into<String>,
     ) -> WasmBoxedStream<'a, GraphEvent> {
-        self.stream_events(task.into(), Some(run_id))
+        self.stream_events(task.into(), Some(run_id), RunState::default())
+    }
+
+    /// [`stream_as`](Self::stream_as) with the request-scoped `state` of the
+    /// run; a resumed run needs it passed again. See [`RunState`].
+    pub fn stream_as_with_state<'a>(
+        &'a self,
+        run_id: &'a str,
+        task: impl Into<String>,
+        state: RunState,
+    ) -> WasmBoxedStream<'a, GraphEvent> {
+        self.stream_events(task.into(), Some(run_id), state)
     }
 
     /// Run the graph on `task`, reporting each node as it starts, writes and
@@ -604,13 +699,24 @@ impl Graph {
     /// The run makes progress only while the stream is polled, and stops
     /// when the stream is dropped.
     pub fn stream(&self, task: impl Into<String>) -> WasmBoxedStream<'_, GraphEvent> {
-        self.stream_events(task.into(), None)
+        self.stream_events(task.into(), None, RunState::default())
+    }
+
+    /// [`stream`](Self::stream) with the request-scoped `state` of the run.
+    /// See [`RunState`].
+    pub fn stream_with_state(
+        &self,
+        task: impl Into<String>,
+        state: RunState,
+    ) -> WasmBoxedStream<'_, GraphEvent> {
+        self.stream_events(task.into(), None, state)
     }
 
     fn stream_events<'a>(
         &'a self,
         task: String,
         run_id: Option<&'a str>,
+        state: RunState,
     ) -> WasmBoxedStream<'a, GraphEvent> {
         let span = run_span(run_id);
         events(
@@ -619,7 +725,7 @@ impl Graph {
                     let _ = sender.send(event);
                 };
                 let outcome = self
-                    .run_task(task, self.saving(run_id), false, Some(&emit))
+                    .run_task(task, self.saving(run_id), false, Some(&emit), state)
                     .instrument(span.clone())
                     .await;
                 record_outcome(&span, &outcome);
@@ -645,6 +751,7 @@ impl Graph {
         saving: Option<Saving>,
         nested: bool,
         emit: Option<Emit<'_, GraphEvent>>,
+        run_state: RunState,
     ) -> Result<GraphRun, GraphError> {
         let inner = &*self.inner;
         let started = Instant::now();
@@ -691,6 +798,7 @@ impl Graph {
                     task,
                     ..GraphState::default()
                 };
+                state.run = run_state.clone();
                 usage = Usage::default();
                 last = Vec::new();
                 executions = 0;
@@ -726,6 +834,7 @@ impl Graph {
                 }
                 clock = Clock::resumed(Duration::from_millis(saved.active_ms));
                 state = saved.state;
+                state.run = run_state.clone();
                 usage = saved.usage;
                 last = saved.last;
                 executions = saved.executions;
@@ -808,11 +917,13 @@ impl Graph {
                             otel.status_code = tracing::field::Empty,
                             error.type = tracing::field::Empty,
                         );
+                        let run_state = run_state.clone();
                         async move {
                             let Some(emit) = emit else {
                                 let io = NodeIo::quiet(&node.id)
                                     .saving_to(saving)
-                                    .with_turns(inner.max_turns);
+                                    .with_turns(inner.max_turns)
+                                    .with_run_state(run_state.clone());
                                 let run = node.node.run(input, &io).instrument(span.clone());
                                 let outcome = clock.within(budget, run).await;
                                 record_node(&span, &outcome);
@@ -835,7 +946,8 @@ impl Graph {
                             };
                             let io = NodeIo::streaming(&node.id, &on_text, &on_question)
                                 .saving_to(saving)
-                                .with_turns(inner.max_turns);
+                                .with_turns(inner.max_turns)
+                                .with_run_state(run_state.clone());
                             let run = node.node.run(input, &io).instrument(span.clone());
                             let outcome = clock.within(budget, run).await;
                             record_node(&span, &outcome);
@@ -983,7 +1095,9 @@ impl Node for Graph {
                 _ => {}
             };
             let emit: Option<Emit<'_, GraphEvent>> = io.is_streaming().then_some(&emit);
-            let run = self.run_task(input, saving, true, emit).await?;
+            let run = self
+                .run_task(input, saving, true, emit, io.run_state().clone())
+                .await?;
             Ok(NodeOutput::new(run.answer()).with_usage(run.usage))
         })
     }

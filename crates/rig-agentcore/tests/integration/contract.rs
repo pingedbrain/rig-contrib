@@ -31,7 +31,16 @@ async fn ping_reports_healthy() {
         .json()
         .await
         .unwrap();
-    assert_eq!(body, json!({"status": "Healthy"}));
+    assert_eq!(body.get("status"), Some(&json!("Healthy")));
+    assert!(
+        body.get("time_of_last_update").is_some_and(Value::is_u64),
+        "{body}"
+    );
+    assert_eq!(
+        body.as_object().map(|object| object.len()),
+        Some(2),
+        "{body}"
+    );
 }
 
 #[tokio::test]

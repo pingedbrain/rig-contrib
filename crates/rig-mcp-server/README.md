@@ -64,6 +64,42 @@ While an agent writes, its text streams to the client as **progress notification
 (when the client asks for progress). When the client **cancels** a call, the agent run
 stops.
 
+## Resources and prompts
+
+Besides tools, a server can offer fixed **resources** (`resources/list` and
+`resources/read`) and **prompts** (`prompts/list` and `prompts/get`). A server that has
+none of either does not advertise those capabilities.
+
+```rust
+use std::collections::HashMap;
+
+use rig_mcp_server::McpServer;
+use rig_mcp_server::rmcp::model::{PromptArgument, PromptMessage, Role};
+
+fn docs_server() -> McpServer {
+    McpServer::new("docs")
+        .resource("docs://style", "style", "text/markdown", "Use short sentences.")
+        .prompt(
+            "review",
+            "Review a change for a reader.",
+            vec![PromptArgument::new("diff").with_required(true)],
+            |args: &HashMap<String, String>| {
+                let diff = args.get("diff").map_or("", String::as_str);
+                vec![PromptMessage::new_text(Role::User, format!("Review this change:\n{diff}"))]
+            },
+        )
+}
+```
+
+- `resource(uri, name, mime_type, text)` offers text. `binary_resource(uri, name,
+  mime_type, bytes)` offers bytes, sent base64-encoded.
+- `prompt(name, description, arguments, render)` offers a prompt. `render` gets the
+  arguments the client passed, all strings keyed by name, and returns the messages. A
+  call without a required argument gets an invalid-params error.
+
+Resource templates, resource subscriptions, list-changed notifications and completion
+for prompt arguments are not supported; their capabilities are not advertised.
+
 ## Transports
 
 ```rust
@@ -142,7 +178,8 @@ rig-mcp-server = { version = "0.47", features = ["otel"] }
 
 `cargo test` drives the server with the official `rmcp` client in memory: listing,
 schemas and annotations, plain tools, agent sessions, streamed progress, typed answers,
-cancellation, time limits, HTTP with and without the token, and a Rig agent using the
+cancellation, time limits, resources and prompts (listing, reads, rendering, missing
+arguments, capabilities), HTTP with and without the token, and a Rig agent using the
 served tools through `rig-rmcp` (Rig to MCP to Rig).
 
 `interop/run.sh` checks the server against an independent implementation, the official
@@ -151,5 +188,6 @@ mcp_echo_server`). CI runs both, plus MSRV and `cargo-deny`.
 
 ## Not supported
 
-MCP resources, prompts, sampling and elicitation; the SEP-2663 tasks extension
+MCP resource templates, resource subscriptions, list-changed notifications, prompt and
+resource completion, sampling and elicitation; the SEP-2663 tasks extension
 (long calls run to completion, reporting progress); OAuth (bearer only).

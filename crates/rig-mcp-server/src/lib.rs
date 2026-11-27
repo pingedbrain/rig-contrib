@@ -33,6 +33,7 @@
     )
 )]
 
+mod catalog;
 mod content;
 mod history;
 #[cfg(feature = "otel")]

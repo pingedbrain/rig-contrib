@@ -7,7 +7,7 @@
 //! ECS task, an EC2 instance or a Lambda function, or a local profile.
 //! Traces need CloudWatch Transaction Search enabled on the account.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
@@ -31,6 +31,29 @@ pub enum AwsError {
     /// The tokio runtime the exporters sign requests on is missing.
     #[error("set up CloudWatch export from inside a tokio runtime")]
     NoRuntime,
+    /// The HTTP client for the endpoints could not be built.
+    #[error("HTTP client for CloudWatch: {0}")]
+    Client(String),
+}
+
+/// The OTel spec default for OTLP exporter timeouts.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounds the TCP and TLS connect, so a black-holed host fails fast.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The export timeout for one signal, as the plain OTLP exporters read it:
+/// `signal_var` (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or
+/// `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT`), then `OTEL_EXPORTER_OTLP_TIMEOUT`,
+/// in milliseconds. Zero and unparsable values are ignored; then 10 s.
+fn export_timeout(signal_var: &str) -> Duration {
+    export_timeout_from(signal_var, |var| std::env::var(var).ok())
+}
+
+fn export_timeout_from(signal_var: &str, lookup: impl Fn(&str) -> Option<String>) -> Duration {
+    [signal_var, "OTEL_EXPORTER_OTLP_TIMEOUT"]
+        .into_iter()
+        .find_map(|var| lookup(var)?.trim().parse::<u64>().ok().filter(|ms| *ms > 0))
+        .map_or(DEFAULT_TIMEOUT, Duration::from_millis)
 }
 
 /// An OTLP HTTP client that signs each request with SigV4 for the service
@@ -119,28 +142,195 @@ impl TelemetryBuilder {
         let credentials = config
             .credentials_provider()
             .ok_or(InitError::Aws(AwsError::NoCredentials))?;
-        let client = SigV4Client {
-            http: reqwest::Client::new(),
-            credentials,
-            region: region.clone(),
+        let spans_url = format!("https://xray.{region}.amazonaws.com/v1/traces");
+        let metrics_url = format!("https://monitoring.{region}.amazonaws.com/v1/metrics");
+        self.cloudwatch_exporters(
             runtime,
+            region,
+            credentials,
+            (
+                spans_url,
+                export_timeout("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"),
+            ),
+            (
+                metrics_url,
+                export_timeout("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"),
+            ),
+        )
+    }
+
+    fn cloudwatch_exporters(
+        self,
+        runtime: tokio::runtime::Handle,
+        region: String,
+        credentials: SharedCredentialsProvider,
+        spans: (String, Duration),
+        metrics: (String, Duration),
+    ) -> Result<Self, InitError> {
+        let client = |timeout: Duration| -> Result<SigV4Client, InitError> {
+            let http = reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(timeout)
+                .build()
+                .map_err(|error| InitError::Aws(AwsError::Client(error.to_string())))?;
+            Ok(SigV4Client {
+                http,
+                credentials: credentials.clone(),
+                region: region.clone(),
+                runtime: runtime.clone(),
+            })
         };
-        let spans = opentelemetry_otlp::SpanExporter::builder()
+        let spans_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .with_http_client(client.clone())
+            .with_http_client(client(spans.1)?)
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(format!("https://xray.{region}.amazonaws.com/v1/traces"))
+            .with_endpoint(spans.0)
             .build()
             .map_err(InitError::SpanExporter)?;
-        let metrics = opentelemetry_otlp::MetricExporter::builder()
+        let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
-            .with_http_client(client)
+            .with_http_client(client(metrics.1)?)
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(format!(
-                "https://monitoring.{region}.amazonaws.com/v1/metrics"
-            ))
+            .with_endpoint(metrics.0)
             .build()
             .map_err(InitError::MetricExporter)?;
-        Ok(self.span_exporter(spans).metric_exporter(metrics))
+        Ok(self
+            .span_exporter(spans_exporter)
+            .metric_exporter(metrics_exporter))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    use aws_credential_types::Credentials;
+    use aws_credential_types::provider::SharedCredentialsProvider;
+    use tokio::net::TcpListener;
+
+    use super::{DEFAULT_TIMEOUT, TelemetryBuilder, export_timeout_from};
+    use crate::Telemetry;
+
+    fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |var| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == var)
+                .map(|(_, value)| (*value).to_owned())
+        }
+    }
+
+    #[test]
+    fn the_signal_variable_beats_the_general_one() {
+        let lookup = env(&[
+            ("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "1500"),
+            ("OTEL_EXPORTER_OTLP_TIMEOUT", "3000"),
+        ]);
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", &lookup),
+            Duration::from_millis(1500)
+        );
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT", &lookup),
+            Duration::from_millis(3000)
+        );
+    }
+
+    #[test]
+    fn zero_and_junk_fall_through_to_the_general_variable_then_the_default() {
+        let lookup = env(&[
+            ("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "0"),
+            ("OTEL_EXPORTER_OTLP_TIMEOUT", "0"),
+        ]);
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", &lookup),
+            DEFAULT_TIMEOUT
+        );
+        let lookup = env(&[
+            ("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "0"),
+            ("OTEL_EXPORTER_OTLP_TIMEOUT", "2000"),
+        ]);
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", &lookup),
+            Duration::from_millis(2000)
+        );
+        let lookup = env(&[("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "soon")]);
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", &lookup),
+            DEFAULT_TIMEOUT
+        );
+        assert_eq!(
+            export_timeout_from("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", env(&[])),
+            DEFAULT_TIMEOUT
+        );
+    }
+
+    /// Exporting to a server that accepts and never answers fails within the
+    /// timeout, and flush and shutdown return.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hung_cloudwatch_endpoint_fails_the_export_within_its_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let accept = tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+
+        let credentials = Credentials::new("AKIDEXAMPLE", "dummy-secret", None, None, "test");
+        let timeout = Duration::from_millis(300);
+        let url = |path: &str| format!("{base}{path}");
+        let (telemetry, subscriber): (Telemetry, _) = TelemetryBuilder::default()
+            .service_name("rig-otel-test")
+            .cloudwatch_exporters(
+                tokio::runtime::Handle::current(),
+                "us-east-1".to_owned(),
+                SharedCredentialsProvider::new(credentials),
+                (url("/v1/traces"), timeout),
+                (url("/v1/metrics"), timeout),
+            )
+            .unwrap()
+            .logs(false)
+            .build()
+            .unwrap();
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::info_span!("hung export").in_scope(|| ());
+        drop(guard);
+
+        let outer = Duration::from_secs(10);
+        let (telemetry, flushed, flush_took) = tokio::time::timeout(
+            outer,
+            tokio::task::spawn_blocking(move || {
+                let started = Instant::now();
+                let flushed = telemetry.force_flush();
+                (telemetry, flushed, started.elapsed())
+            }),
+        )
+        .await
+        .expect("flush did not return within 10 s")
+        .unwrap();
+        assert!(flushed.is_err(), "flush against a hung endpoint must fail");
+        assert!(
+            flush_took < Duration::from_secs(2),
+            "flush took {flush_took:?}"
+        );
+
+        let shutdown_took = tokio::time::timeout(
+            outer,
+            tokio::task::spawn_blocking(move || {
+                let started = Instant::now();
+                drop(telemetry);
+                started.elapsed()
+            }),
+        )
+        .await
+        .expect("shutdown did not return within 10 s")
+        .unwrap();
+        assert!(
+            shutdown_took < Duration::from_secs(2),
+            "shutdown took {shutdown_took:?}"
+        );
+        accept.abort();
     }
 }

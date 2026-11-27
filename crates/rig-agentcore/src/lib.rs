@@ -13,7 +13,10 @@
 //!   `text/event-stream`, and is one JSON object otherwise;
 //! - each invocation runs in a span that continues the caller's trace and
 //!   carries the session as `session.id` (through [`rig_otel`]), which is what
-//!   AgentCore Observability and Evaluations group a session's traces by.
+//!   AgentCore Observability and Evaluations group a session's traces by;
+//! - `/ping` answers `HealthyBusy` while an invocation or background work from
+//!   [`AgentCoreApp::spawn_task`] is open, so AgentCore Runtime keeps the
+//!   session running until that work ends.
 //!
 //! ```no_run
 //! # async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
@@ -33,14 +36,17 @@
     )
 )]
 
+mod busy;
 mod history;
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
@@ -56,8 +62,10 @@ use rig_memory::recent::{Recent, TokenBudget, view};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 
+use crate::busy::Busy;
 use crate::history::{
     HistoryError, HistoryStore, InMemory, Persistent, Retained, Summarizing, is_summary, local_id,
     summarize,
@@ -77,6 +85,11 @@ pub const DEFAULT_MAX_SESSIONS: usize = 1000;
 /// How many tokens of history a session keeps by default.
 pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
 
+/// The largest `/invocations` body by default, in bytes: the limit Axum's JSON
+/// extractor already applied. A larger body gets 413.
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
+
+pub use busy::BusyGuard;
 /// The session stores and history windows conversations are kept with.
 pub use rig_memory;
 
@@ -111,6 +124,10 @@ struct Inner {
     window: Arc<dyn Recent>,
     summarizing: Option<Summarizing>,
     record_content: bool,
+    slots: Option<Arc<Semaphore>>,
+    max_run: Option<Duration>,
+    max_request_bytes: usize,
+    busy: Arc<Busy>,
 }
 
 impl AgentCoreApp {
@@ -123,6 +140,10 @@ impl AgentCoreApp {
                 window: Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
                 summarizing: None,
                 record_content: false,
+                slots: None,
+                max_run: None,
+                max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+                busy: Busy::new(),
             }),
         }
     }
@@ -237,6 +258,66 @@ impl AgentCoreApp {
         self.rebuild(|inner| inner.record_content = record)
     }
 
+    /// Run at most `max` invocations at once (at least one). An invocation
+    /// beyond that gets 429 Too Many Requests before the agent runs; 429 is the
+    /// conventional throttle status. Without this there is no cap, which is the
+    /// default: AgentCore Runtime gives each session its own microVM. Outside
+    /// AgentCore Runtime, a cap around 32 suits most single-process apps.
+    #[must_use]
+    pub fn max_concurrent_tasks(self, max: usize) -> Self {
+        self.rebuild(|inner| inner.slots = Some(Arc::new(Semaphore::new(max.max(1)))))
+    }
+
+    /// Stop an invocation that runs longer than `max`, counting the summarizing
+    /// step that can run before it. A stopped invocation answers 504 Gateway
+    /// Timeout (or an `{"error"}` event when streaming), and its turn is not
+    /// added to the session. Without this there is no limit, which is the
+    /// default. Outside AgentCore Runtime, ten minutes suits most agents.
+    #[must_use]
+    pub fn max_run_duration(self, max: Duration) -> Self {
+        self.rebuild(|inner| inner.max_run = Some(max))
+    }
+
+    /// Refuse an `/invocations` body larger than `bytes` with 413 Payload Too
+    /// Large, before it is parsed. Defaults to [`DEFAULT_MAX_REQUEST_BYTES`].
+    #[must_use]
+    pub fn max_request_bytes(self, bytes: usize) -> Self {
+        self.rebuild(|inner| inner.max_request_bytes = bytes)
+    }
+
+    /// Mark background work as open until the returned guard drops. While any
+    /// guard is alive, `/ping` answers `HealthyBusy`, so AgentCore Runtime keeps
+    /// the session running; once they are all dropped it answers `Healthy`
+    /// again. Use it for work that outlives an invocation, such as a task the
+    /// app starts on its own.
+    pub fn track_task(&self) -> BusyGuard {
+        Busy::open(&self.inner.busy)
+    }
+
+    /// Run `future` on the Tokio runtime as background work. `/ping` answers
+    /// `HealthyBusy` until it finishes, or until its task is aborted. Dropping
+    /// the returned handle does not stop the task. Call it on a running Tokio
+    /// runtime, as for [`tokio::spawn`].
+    ///
+    /// ```no_run
+    /// # async fn run(app: &rig_agentcore::AgentCoreApp) {
+    /// app.spawn_task(async {
+    ///     // Work that outlives the invocation that started it.
+    /// });
+    /// # }
+    /// ```
+    pub fn spawn_task<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let guard = self.track_task();
+        tokio::spawn(async move {
+            let _guard = guard;
+            future.await
+        })
+    }
+
     fn rebuild(self, change: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = Arc::try_unwrap(self.inner).unwrap_or_else(|shared| (*shared).clone());
         change(&mut inner);
@@ -247,8 +328,12 @@ impl AgentCoreApp {
 
     /// The contract's routes, `/invocations` and `/ping`, as an Axum router.
     pub fn router(self) -> axum::Router {
+        let limit = self.inner.max_request_bytes;
         axum::Router::new()
-            .route("/invocations", post(invoke))
+            .route(
+                "/invocations",
+                post(invoke).layer(DefaultBodyLimit::max(limit)),
+            )
             .route("/ping", get(ping))
             .with_state(self)
     }
@@ -299,8 +384,14 @@ struct Invocation {
     prompt: String,
 }
 
-async fn ping() -> Json<serde_json::Value> {
-    Json(json!({"status": "Healthy"}))
+/// `Healthy`, or `HealthyBusy` while work is open, with the Unix time (in
+/// seconds) the status last changed. The time moves only on a change, as
+/// AgentCore's contract asks: a time that advanced on every ping would keep the
+/// idle timeout from firing.
+async fn ping(State(app): State<AgentCoreApp>) -> Json<serde_json::Value> {
+    let (busy, since) = app.inner.busy.status();
+    let status = if busy { "HealthyBusy" } else { "Healthy" };
+    Json(json!({"status": status, "time_of_last_update": since}))
 }
 
 async fn invoke(
@@ -308,12 +399,41 @@ async fn invoke(
     headers: HeaderMap,
     body: Result<Json<Invocation>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    let Ok(Json(invocation)) = body else {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "the body must be a JSON object with a \"prompt\" string",
-        );
+    let invocation = match body {
+        Ok(Json(invocation)) => invocation,
+        Err(rejection) => {
+            if rejection.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+                return error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    &format!(
+                        "the request body is larger than {} bytes",
+                        app.inner.max_request_bytes
+                    ),
+                );
+            }
+            return error(
+                StatusCode::BAD_REQUEST,
+                "the body must be a JSON object with a \"prompt\" string",
+            );
+        }
     };
+    // Held until the run ends, however it ends. Checked before the session is
+    // loaded, so a refused invocation never touches the agent or the history.
+    let slot = match &app.inner.slots {
+        None => None,
+        Some(slots) => match Arc::clone(slots).try_acquire_owned() {
+            Ok(slot) => Some(slot),
+            Err(_) => {
+                return error(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "the agent is busy; try again shortly",
+                );
+            }
+        },
+    };
+    // Open for the whole run, however it ends. Opened after the slot, so a
+    // refused invocation does not flip the status.
+    let busy = app.track_task();
     let session = headers
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -350,9 +470,9 @@ async fn invoke(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|accept| accept.contains("text/event-stream"));
     if streams {
-        stream(app, session, invocation.prompt, span)
+        stream(app, session, invocation.prompt, span, slot, busy)
     } else {
-        whole(app, session, invocation.prompt)
+        whole(app, session, invocation.prompt, slot, busy)
             .instrument(span)
             .await
     }
@@ -388,37 +508,83 @@ async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, Histor
     Ok(sent)
 }
 
-async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
+async fn whole(
+    app: AgentCoreApp,
+    session: String,
+    prompt: String,
+    _slot: Option<OwnedSemaphorePermit>,
+    _busy: BusyGuard,
+) -> Response {
     let inner = &app.inner;
-    let history = match history_of(inner, &session).await {
-        Ok(history) => history,
-        Err(failure) => {
+    let deadline = deadline_of(inner.max_run);
+    let history = match within(deadline, history_of(inner, &session)).await {
+        Ok(Ok(history)) => history,
+        Ok(Err(failure)) => {
             tracing::warn!(error = %failure, "could not load the conversation");
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the conversation could not be loaded",
             );
         }
+        Err(_) => {
+            tracing::warn!(max = ?inner.max_run, "agent run took too long");
+            return timed_out(inner.max_run);
+        }
     };
-    let run = inner
-        .agent
-        .prompt(prompt)
-        .history(history)
-        .record_content_telemetry(inner.record_content)
-        .run()
-        .await;
+    let run = within(
+        deadline,
+        inner
+            .agent
+            .prompt(prompt)
+            .history(history)
+            .record_content_telemetry(inner.record_content)
+            .run(),
+    )
+    .await;
     match run {
-        Ok(response) => {
+        // A stopped run is dropped before `save`, so its turn is not kept.
+        Err(_) => {
+            tracing::warn!(max = ?inner.max_run, "agent run took too long");
+            timed_out(inner.max_run)
+        }
+        Ok(Ok(response)) => {
             save(inner, &session, response.messages.clone()).await;
             let answer = response.output();
             record_answer(inner.record_content, &answer);
             Json(json!({"response": answer, "status": "success"})).into_response()
         }
-        Err(failure) => {
+        Ok(Err(failure)) => {
             tracing::warn!(error = %failure, "agent run failed");
             error(StatusCode::INTERNAL_SERVER_ERROR, "the agent run failed")
         }
     }
+}
+
+/// The deadline for an invocation's run, from the start of the invocation.
+fn deadline_of(max: Option<Duration>) -> Option<tokio::time::Instant> {
+    max.map(|max| tokio::time::Instant::now() + max)
+}
+
+/// `future`, stopped at `deadline` when there is one.
+async fn within<F: std::future::Future>(
+    deadline: Option<tokio::time::Instant>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, future).await,
+        None => Ok(future.await),
+    }
+}
+
+fn timeout_text(max: Option<Duration>) -> String {
+    match max {
+        Some(max) => format!("the agent run took longer than {max:?}"),
+        None => "the agent run took too long".to_owned(),
+    }
+}
+
+fn timed_out(max: Option<Duration>) -> Response {
+    error(StatusCode::GATEWAY_TIMEOUT, &timeout_text(max))
 }
 
 /// Add a finished run to its session. A save that fails is logged, not
@@ -445,16 +611,31 @@ async fn save(inner: &Inner, session: &str, messages: Vec<Message>) {
 
 /// Stream the reply as server-sent events: `{"text": ...}` as the model
 /// writes, then `{"response": ...}` with the whole answer, or `{"error": ...}`.
-fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Span) -> Response {
+fn stream(
+    app: AgentCoreApp,
+    session: String,
+    prompt: String,
+    span: tracing::Span,
+    slot: Option<OwnedSemaphorePermit>,
+    busy: BusyGuard,
+) -> Response {
     let (sender, receiver) = mpsc::unbounded_channel::<serde_json::Value>();
     tokio::spawn(
         async move {
+            let _slot = slot;
+            let _busy = busy;
             let inner = &app.inner;
-            let history = match history_of(inner, &session).await {
-                Ok(history) => history,
-                Err(failure) => {
+            let deadline = deadline_of(inner.max_run);
+            let history = match within(deadline, history_of(inner, &session)).await {
+                Ok(Ok(history)) => history,
+                Ok(Err(failure)) => {
                     tracing::warn!(error = %failure, "could not load the conversation");
                     let _ = sender.send(json!({"error": "the conversation could not be loaded"}));
+                    return;
+                }
+                Err(_) => {
+                    tracing::warn!(max = ?inner.max_run, "agent run took too long");
+                    let _ = sender.send(json!({"error": timeout_text(inner.max_run)}));
                     return;
                 }
             };
@@ -464,7 +645,16 @@ fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Spa
                 .history(history)
                 .record_content_telemetry(inner.record_content)
                 .stream();
-            while let Some(item) = run.next().await {
+            loop {
+                let item = match within(deadline, run.next()).await {
+                    Ok(Some(item)) => item,
+                    Ok(None) => break,
+                    Err(_) => {
+                        tracing::warn!(max = ?inner.max_run, "agent run took too long");
+                        let _ = sender.send(json!({"error": timeout_text(inner.max_run)}));
+                        return;
+                    }
+                };
                 match item {
                     Ok(MultiTurnStreamItem::StreamAssistantItem(Item::Event(
                         StreamEvent::Text { text, .. },

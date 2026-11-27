@@ -23,6 +23,7 @@ mod multiagent;
 mod output;
 mod target;
 mod telemetry;
+mod timeout;
 
 use rig_core::completion::Usage;
 
