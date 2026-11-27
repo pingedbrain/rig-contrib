@@ -30,6 +30,19 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
 
 ```rust
 use rig_a2a::RemoteAgent;
+
+const URL: &str = "http://127.0.0.1:3000";
+
+/// Ask a remote A2A agent directly. Its answer is `reply.text`.
+async fn ask(question: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let remote = RemoteAgent::connect(URL).await?;
+    let reply = remote.send(question, None).await?;
+    Ok(reply.text)
+}
+```
+
+```rust
+use rig_a2a::RemoteAgent;
 use rig_agent::AgentBuilder;
 
 const URL: &str = "http://127.0.0.1:3000";
@@ -199,6 +212,12 @@ rig-a2a = { version = "0.47", features = ["otel"] }
 
 Install an OpenTelemetry subscriber on both sides (`rig_otel::init()`); without the
 feature nothing changes and no OpenTelemetry crates are pulled in.
+
+## Content recording
+
+Prompts and replies go on the agent's spans only when it records content. It is off by
+default, as in Rig. Set it on the agent you serve with
+`AgentBuilder::record_content_telemetry(true)`.
 
 ## Not supported
 
