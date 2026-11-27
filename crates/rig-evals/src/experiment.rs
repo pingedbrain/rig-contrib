@@ -22,7 +22,9 @@ use crate::{
 /// a `gen_ai.evaluation.result` event on the trial span, with the
 /// OpenTelemetry GenAI fields `gen_ai.evaluation.name`,
 /// `gen_ai.evaluation.score.value`, `gen_ai.evaluation.score.label` (the
-/// score's label, else `pass` or `fail`) and `gen_ai.evaluation.explanation`.
+/// score's label, else `pass` or `fail`). The explanation is the judge's
+/// text, which can quote the agent's answer or the prompt, so it is recorded
+/// only with [`record_content`](Self::record_content).
 pub struct Experiment {
     name: String,
     dataset: Dataset,
@@ -33,6 +35,7 @@ pub struct Experiment {
     thresholds: Vec<(String, f64)>,
     sinks: Vec<Box<dyn Sink>>,
     trial_timeout: Option<Duration>,
+    record_content: bool,
 }
 
 impl Experiment {
@@ -48,6 +51,7 @@ impl Experiment {
             thresholds: Vec::new(),
             sinks: Vec::new(),
             trial_timeout: None,
+            record_content: false,
         }
     }
 
@@ -99,6 +103,17 @@ impl Experiment {
     #[must_use]
     pub fn sink(mut self, sink: impl Sink + 'static) -> Self {
         self.sinks.push(Box::new(sink));
+        self
+    }
+
+    /// Record each score's explanation on its `gen_ai.evaluation.result`
+    /// event as `gen_ai.evaluation.explanation`. Off by default: the
+    /// explanation is the judge's text, which can quote the agent's answer or
+    /// the prompt, and telemetry is shared with the backend. The report keeps
+    /// the explanation either way.
+    #[must_use]
+    pub fn record_content(mut self, record: bool) -> Self {
+        self.record_content = record;
         self
     }
 
@@ -291,11 +306,16 @@ impl Experiment {
                         .label
                         .as_deref()
                         .unwrap_or(if score.passed { "pass" } else { "fail" });
+                let explanation = if self.record_content {
+                    score.explanation.as_deref()
+                } else {
+                    None
+                };
                 tracing::info!(
                     gen_ai.evaluation.name = %score.evaluator,
                     gen_ai.evaluation.score.value = score.value,
                     gen_ai.evaluation.score.label = %label,
-                    gen_ai.evaluation.explanation = score.explanation.as_deref(),
+                    gen_ai.evaluation.explanation = explanation,
                     "gen_ai.evaluation.result"
                 );
                 scores.push(score);
