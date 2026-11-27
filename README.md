@@ -61,7 +61,7 @@ Each cell is the builder method on that crate, with its default in brackets. `�
 | Concurrency cap | `max_concurrent_tasks` (32) | `max_concurrent_calls` (32) | — | — | `concurrency` (4 trials, not requests) | `max_concurrent_tasks` (no limit) |
 | History window | `history_window` (32,000 tokens) | `history_window` (32,000 tokens) | — | — | — | `history_window` (32,000 tokens) |
 | Max sessions | `max_contexts` (1,000) | `max_sessions` (1,000) | — | — | — | `max_sessions` (1,000) |
-| Request size limit | `max_request_bytes` (2 MiB) | — | — | — | — | `max_request_bytes` (2 MiB) |
+| Request size limit | `max_request_bytes` (2 MiB) | `max_request_bytes` (4 MiB, HTTP only) | — | — | — | `max_request_bytes` (2 MiB) |
 | Content recording | — | — | — | — | — | `record_content` (false) |
 | Bearer token | `bearer_token` on `A2aServer` (none); `bearer_token` on `RemoteAgentBuilder` (none) | `bearer_token` (none, HTTP only) | — | — | — | — |
 | Turn budget | — | — | `max_turns_per_agent` (8) | — | — | — |

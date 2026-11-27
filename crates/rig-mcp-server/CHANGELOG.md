@@ -5,6 +5,10 @@ Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 ## Unreleased
 
 - Logs no longer print the Rig error text. A failed agent call, a failed typed call, and a failed session load or save log a short `kind` and a fixed reason, never the error text, because the text can carry provider output or prompt content. No public API or behavior changed.
+- `McpServer::max_request_bytes(n)`, with `DEFAULT_MAX_REQUEST_BYTES` (4 MiB, the limit the
+  MCP SDK already applied): an HTTP request body over the limit gets 413 Payload Too Large
+  before it is parsed. The default is unchanged. Needs rmcp 3.12.
+
 - Docs: doc alias `max_concurrent_tasks` on `McpServer::max_concurrent_calls`. The root README has a table of the settings across the crates. No names or behavior changed.
 - Examples `typed_tool` and `mcp_echo_server` print one line on failure (`error: could not listen on
   127.0.0.1:3400: ...`, or the `PORT` value that is not a number) instead of Rust's `Debug` output.
