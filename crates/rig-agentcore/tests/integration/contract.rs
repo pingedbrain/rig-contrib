@@ -153,10 +153,7 @@ async fn an_invocation_continues_the_trace_and_names_the_session() {
         .logs(false)
         .build()
         .unwrap();
-    // With a single dispatcher registered, tracing caches a callsite as off
-    // for every thread when another test's thread (no subscriber) reaches it
-    // first. A second, no-op dispatcher alive meanwhile turns that shortcut off.
-    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    crate::pin_global_default();
     let guard = tracing::subscriber::set_default(subscriber);
     let agent = AgentBuilder::new(MockCompletionModel::text("ok"))
         .name("helper")
