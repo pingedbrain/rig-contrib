@@ -26,7 +26,7 @@ opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false }
 tokio = { version = "1.54.1", features = ["full"] }
-rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
 rig-memory = { version = "0.47", default-features = false, features = ["fs"] }
 tempfile = "3"
