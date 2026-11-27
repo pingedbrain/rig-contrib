@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The CloudWatch exporters (`aws_cloudwatch`) time out: 10 s per request by default, set by `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` / `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds; zero is ignored), with a 5 s connect timeout. A hung endpoint no longer stalls the batch exporter or shutdown.
 - README snippets are compile-checked as doctests; the conversation example awaits the prompt inside an async block before `.instrument(span)`.
 
 ## 0.47.3 (2026-11-27)
