@@ -83,7 +83,7 @@ a Strands `A2AServer` as a tool.
 
 - one JSON block: `reply`, `context_id`, `state`, `data` (structured parts) and
   `files` (name, media type, URL or size; small text files inlined);
-- then each image, as an image the model can look at (inline up to 5 MB, or by URL).
+- then each image, as an image the model can look at (inline up to 5 MiB, or by URL).
 
 Numbers in data parts can come back as floats over v1.0 (`42` as `42.0`): the
 protocol carries them as a protobuf `Struct`, whose numbers are doubles.
@@ -100,6 +100,14 @@ Both ways agents stream are understood: artifact chunks (Rig, most SDKs) and
 A second client can attach to a running task with `tasks/resubscribe`
 (`A2AClient::subscribe_to_task`). It gets the task's updates from then on, and the
 stream ends when the task does.
+
+Limits on what a remote agent may send, enforced by the client:
+
+- agent card: 1 MiB. A larger card is a `RemoteError::Card` at `connect`.
+- v0.3 `message/send` reply: 16 MiB. A larger reply is an error.
+- v0.3 stream: one event is at most 16 MiB before its blank line. A longer event ends
+  the stream with an error.
+- image in a tool result: 5 MiB (see Replies).
 
 ## Serving: what comes back
 

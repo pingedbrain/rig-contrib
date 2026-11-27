@@ -139,7 +139,8 @@ pub enum ReplyEvent {
 
 impl RemoteAgent {
     /// Connect to the agent whose card is under `base_url`, with no
-    /// credentials and the [`DEFAULT_TIMEOUT`].
+    /// credentials and the [`DEFAULT_TIMEOUT`]. The card is read up to 1 MiB;
+    /// a larger one is a [`RemoteError::Card`].
     pub async fn connect(base_url: &str) -> Result<Self, RemoteError> {
         Self::builder(base_url).connect().await
     }
@@ -211,6 +212,10 @@ impl RemoteAgent {
     /// text as it grows, then [`ReplyEvent::Done`] with the whole answer.
     /// Each event must arrive within the timeout of the one before. An agent
     /// that does not stream yields its whole answer as one `Done`.
+    ///
+    /// Over A2A v0.3, one event may be 16 MiB before its blank line; a longer
+    /// one ends the stream with an error. A v0.3 `message/send` reply, which
+    /// an agent that does not stream sends instead, is capped at 16 MiB too.
     pub async fn stream(
         &self,
         text: &str,

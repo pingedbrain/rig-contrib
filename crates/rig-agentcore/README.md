@@ -85,7 +85,7 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
   the cap, 429 before the agent runs; no cap by default, since AgentCore Runtime gives each
   session its own microVM). `max_run_duration` stops an invocation, summarizing included,
   after a time (504, or an `{"error"}` event when streaming, and its turn is not kept; no
-  limit by default). `max_request_bytes` sets the body limit (default 2 MB, answered with 413).
+  limit by default). `max_request_bytes` sets the body limit (default 2 MiB, answered with 413).
   Outside AgentCore Runtime, a cap around 32 and a ten-minute run limit suit most agents.
 
   ```rust
@@ -279,7 +279,8 @@ export IMAGE=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
    aws xray update-trace-segment-destination --destination CloudWatchLogs --region $AWS_REGION
    ```
 
-   Then add traces to your agent. Build the agent with `record_content(true)`, call
+   Then add traces to your agent. Serve it through `AgentCoreApp::new(agent).record_content(true)`,
+   since the app's setting overrides the agent's `record_content_telemetry`. Call
    `rig_otel::Telemetry::builder().aws_cloudwatch().await`, and set
    `OTEL_RESOURCE_ATTRIBUTES=service.name=<name>,aws.log.group.names=/aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT`
    on the runtime, as `rig-otel` documents. AgentCore Observability and Evaluations then read

@@ -162,6 +162,7 @@ Every call to an agent spends model tokens, so a server bounds them:
 | `max_concurrent_calls` | 32 | an error result saying the server is busy, before any model call |
 | `max_run_duration` | 10 min | the run is stopped, an error result |
 | `bearer_token` (HTTP) | none | HTTP 401 |
+| `max_request_bytes` (HTTP) | 4 MiB | HTTP 413, before the body is parsed |
 
 Each agent call runs in an `mcp.agent_call` tracing span (with `mcp.session_id`); Rig's
 spans for the model calls and tools nest under it.
