@@ -6,6 +6,7 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 - Example `remote_tool`: a local Rig agent calls an in-process A2A agent as a tool. Models:
   OpenRouter, or OpenCode Go with `RIG_MODEL=opencode-go/<model>`.
+- README snippets are compile-checked as doctests; `DirStore` is opened with `DirStore::open`.
 - README: the call example sets `default_max_turns`. Rig's default of one turn failed the
   first remote tool call.
 

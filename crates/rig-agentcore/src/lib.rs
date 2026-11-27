@@ -422,3 +422,7 @@ fn record_answer(record_content: bool, answer: &str) {
 fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message, "status": "error"}))).into_response()
 }
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}

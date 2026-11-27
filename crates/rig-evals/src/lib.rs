@@ -67,3 +67,7 @@ pub use target::{
 };
 #[cfg(feature = "multiagent")]
 pub use target::{NodeTarget, node_target};
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}
