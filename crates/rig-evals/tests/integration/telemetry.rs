@@ -9,11 +9,7 @@ use rig_core::test_utils::{MockCompletionModel, MockTurn};
 use rig_evals::{Case, Evaluator, Experiment, evaluators};
 
 async fn capture<F: Future<Output = ()>>(body: impl FnOnce() -> F) -> Vec<SpanData> {
-    // tracing caches whether each callsite is enabled. With one subscriber
-    // registered, a callsite first hit on another test's thread (no
-    // subscriber) is cached as disabled everywhere; with two, tracing asks
-    // the current subscriber at each event.
-    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    crate::pin_global_default();
     let spans = InMemorySpanExporter::default();
     let (telemetry, subscriber) = rig_otel::Telemetry::builder()
         .span_exporter(spans.clone())
