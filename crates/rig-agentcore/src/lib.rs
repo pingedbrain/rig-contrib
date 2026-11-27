@@ -534,7 +534,7 @@ async fn whole(
     let history = match within(deadline, history_of(inner, &session)).await {
         Ok(Ok(history)) => history,
         Ok(Err(failure)) => {
-            tracing::warn!(error = %failure, "could not load the conversation");
+            tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not load the conversation");
             return error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "the conversation could not be loaded",
@@ -568,7 +568,7 @@ async fn whole(
             Json(json!({"response": answer, "status": "success"})).into_response()
         }
         Ok(Err(failure)) => {
-            tracing::warn!(error = %failure, "agent run failed");
+            tracing::warn!(error = %logged(inner.record_content, "run_failed", &failure), "agent run failed");
             error(StatusCode::INTERNAL_SERVER_ERROR, "the agent run failed")
         }
     }
@@ -619,7 +619,7 @@ async fn save(inner: &Inner, session: &str, messages: Vec<Message>) {
         None => inner.window.as_ref(),
     };
     if let Err(failure) = inner.history.append(session, messages, window).await {
-        tracing::warn!(error = %failure, "could not save the conversation");
+        tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not save the conversation");
     }
 }
 
@@ -643,7 +643,7 @@ fn stream(
             let history = match within(deadline, history_of(inner, &session)).await {
                 Ok(Ok(history)) => history,
                 Ok(Err(failure)) => {
-                    tracing::warn!(error = %failure, "could not load the conversation");
+                    tracing::warn!(error = %logged(inner.record_content, "store_error", &failure), "could not load the conversation");
                     let _ = sender.send(json!({"error": "the conversation could not be loaded"}));
                     return;
                 }
@@ -684,7 +684,7 @@ fn stream(
                     }
                     Ok(_) => {}
                     Err(failure) => {
-                        tracing::warn!(error = %failure, "agent run failed");
+                        tracing::warn!(error = %logged(inner.record_content, "run_failed", &failure), "agent run failed");
                         let _ = sender.send(json!({"error": "the agent run failed"}));
                         return;
                     }
@@ -702,6 +702,20 @@ fn stream(
         ))
     });
     Sse::new(events).into_response()
+}
+
+/// What a log line says about a failure. A provider's error text can echo the
+/// prompt, so it is logged only with `record_content`; otherwise its kind is.
+pub(crate) fn logged(
+    record_content: bool,
+    kind: &'static str,
+    failure: &dyn std::fmt::Display,
+) -> String {
+    if record_content {
+        failure.to_string()
+    } else {
+        kind.to_owned()
+    }
 }
 
 /// Record the agent's answer on the invocation span, the current one.

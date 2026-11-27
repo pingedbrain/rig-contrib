@@ -289,6 +289,18 @@ enum SummarizeError {
     Changed,
 }
 
+impl SummarizeError {
+    /// The kind of failure, which is all a log line may say without `record_content`.
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Run(_) => "run_failed",
+            Self::Empty => "empty_reply",
+            Self::Store(_) => "store_error",
+            Self::Changed => "changed",
+        }
+    }
+}
+
 /// A probe summary whose text marks where the summary text falls in its frame.
 const PROBE: &str = "\u{1}";
 
@@ -405,7 +417,8 @@ pub(crate) async fn summarize(
         }
         Err(error) => {
             span.record("agentcore.summary.outcome", "failed");
-            tracing::warn!(parent: &span, error = %error, "could not summarize the conversation; keeping its full history");
+            let shown = crate::logged(record_content, error.kind(), &error);
+            tracing::warn!(parent: &span, error = %shown, "could not summarize the conversation; keeping its full history");
             None
         }
     }
