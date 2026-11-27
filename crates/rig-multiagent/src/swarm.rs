@@ -156,6 +156,7 @@ impl SwarmBuilder {
     }
 
     /// How long one agent's turn may take. Defaults to 5 minutes.
+    #[doc(alias = "node_timeout")]
     pub fn agent_timeout(mut self, timeout: Duration) -> Self {
         self.agent_timeout = timeout;
         self

@@ -107,6 +107,7 @@ impl<S: TaskStore> A2aServer<S> {
 
     /// Remember at most `max` conversations; see [`A2aExecutor::max_contexts`].
     #[must_use]
+    #[doc(alias = "max_sessions")]
     pub fn max_contexts(mut self, max: usize) -> Self {
         self.executor = self.executor.max_contexts(max);
         self

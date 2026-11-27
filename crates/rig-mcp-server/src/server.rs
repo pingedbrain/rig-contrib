@@ -264,6 +264,7 @@ impl McpServer {
     /// Run at most `max` calls at once (at least one); a call beyond that
     /// gets a "busy" error result before any model call.
     #[must_use]
+    #[doc(alias = "max_concurrent_tasks")]
     pub fn max_concurrent_calls(mut self, max: usize) -> Self {
         self.slots = Arc::new(tokio::sync::Semaphore::new(max.max(1)));
         self

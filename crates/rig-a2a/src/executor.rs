@@ -154,6 +154,7 @@ impl A2aExecutor {
     /// the oldest one started is forgotten first. This is the default, with
     /// [`DEFAULT_MAX_CONTEXTS`]; it replaces a [`history_store`](Self::history_store).
     #[must_use]
+    #[doc(alias = "max_sessions")]
     pub fn max_contexts(mut self, max: usize) -> Self {
         self.history = Arc::new(InMemory::new(max));
         self
