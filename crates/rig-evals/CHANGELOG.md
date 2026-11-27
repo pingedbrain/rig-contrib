@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Dataset errors name the file: a parse error from `Dataset::load` is `DatasetError::InFile { path, source }`, whose source is the `Line` (JSON Lines, with the line number) or `Element` (a JSON array element, with its index from 0) error, or `Json`. `Dataset::from_json` reports element errors by index only. A repeated case id is logged as a warning at load; loading still accepts it, and `Experiment::run` still refuses it. Breaking for `load` callers that matched `Line` or `Json` directly: match `InFile` and its `source` instead.
 - Trial timeout: `Experiment::trial_timeout(Duration)` is opt-in (off by default). A target run over the limit fails its trial with `timed out after <n>s` (an agent keeps its completed turns, as a failed turn does); an evaluator call over it is a failed score labelled `error`. Other trials run on. The limit is per trial and per call, and the turns of one case share it. A timed-out judge's token usage is dropped, so the report's judge tokens undercount. It needs a running tokio runtime. A limit too large for the clock is no limit.
 - New runtime dependency: `rig-evals` now depends directly on tokio (features `rt`, `sync`, `time`) for every user, not only with `agentcore`, where it was optional before. The dependency is required, not transitive.
 - README snippets are compile-checked as doctests (the AgentCore example with the `agentcore` feature).
