@@ -9,7 +9,7 @@ AgentCore runs an agent as an ARM64 container serving its HTTP protocol contract
 | Path | What it does |
 |---|---|
 | `POST /invocations` | Takes `{"prompt": "..."}`. Answers `{"response": "...", "status": "success"}`, or server-sent events (`{"text"}` as the model writes, then `{"response"}`) when the caller accepts `text/event-stream`. |
-| `GET /ping` | `{"status": "Healthy"}`. |
+| `GET /ping` | `{"status": "Healthy"}`, or `"HealthyBusy"` while work is open, with `time_of_last_update`. |
 
 ```rust
 use rig_agent::Agent;
@@ -95,6 +95,20 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
           .max_request_bytes(256 * 1024)
   }
   ```
+- **Background work:** `/ping` answers `HealthyBusy` while an invocation is running, and
+  while work from `spawn_task` or a `track_task` guard is open. AgentCore Runtime keeps a
+  session running while it reports `HealthyBusy`, so a background task outlives the
+  invocation that started it. The status returns to `Healthy` when the work ends.
+
+  ```rust
+  use rig_agentcore::AgentCoreApp;
+
+  fn start_background(app: &AgentCoreApp) {
+      app.spawn_task(async {
+          // Work that continues after the invocation has answered.
+      });
+  }
+  ```
 - **Content:** `record_content(true)` records prompts and replies on the GenAI spans.
   AgentCore Evaluations needs them to judge a session; they are off by default, as in
   Rig.
@@ -115,6 +129,7 @@ What made the spans evaluable: the scope `opentelemetry.instrumentation.rig`,
 
 ## Testing
 
-`cargo test` serves the contract over real HTTP for agents on scripted models: ping, a
+`cargo test` serves the contract over real HTTP for agents on scripted models: ping (with
+busy status while work is open), a
 session keeping its conversation, sessions kept apart, streamed replies, a bad body,
 the run and body limits, and an invocation continuing the caller's trace with the session on every span.
