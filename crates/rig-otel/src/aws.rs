@@ -7,7 +7,7 @@
 //! ECS task, an EC2 instance or a Lambda function, or a local profile.
 //! Traces need CloudWatch Transaction Search enabled on the account.
 
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
@@ -31,6 +31,25 @@ pub enum AwsError {
     /// The tokio runtime the exporters sign requests on is missing.
     #[error("set up CloudWatch export from inside a tokio runtime")]
     NoRuntime,
+    /// The HTTP client for the endpoints could not be built.
+    #[error("HTTP client for CloudWatch: {0}")]
+    Client(#[source] reqwest::Error),
+}
+
+/// The OTel spec default for OTLP exporter timeouts.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Bounds the TCP and TLS connect, so a black-holed host fails fast.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The export timeout for one signal, as the plain OTLP exporters read it:
+/// `signal_var` (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` or
+/// `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT`), then `OTEL_EXPORTER_OTLP_TIMEOUT`,
+/// in milliseconds, then 10 s.
+fn export_timeout(signal_var: &str) -> Duration {
+    [signal_var, "OTEL_EXPORTER_OTLP_TIMEOUT"]
+        .into_iter()
+        .find_map(|var| std::env::var(var).ok()?.trim().parse::<u64>().ok())
+        .map_or(DEFAULT_TIMEOUT, Duration::from_millis)
 }
 
 /// An OTLP HTTP client that signs each request with SigV4 for the service
@@ -119,28 +138,90 @@ impl TelemetryBuilder {
         let credentials = config
             .credentials_provider()
             .ok_or(InitError::Aws(AwsError::NoCredentials))?;
-        let client = SigV4Client {
-            http: reqwest::Client::new(),
-            credentials,
-            region: region.clone(),
+        let spans_url = format!("https://xray.{region}.amazonaws.com/v1/traces");
+        let metrics_url = format!("https://monitoring.{region}.amazonaws.com/v1/metrics");
+        self.cloudwatch_exporters(
             runtime,
+            region,
+            credentials,
+            (
+                spans_url,
+                export_timeout("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT"),
+            ),
+            (
+                metrics_url,
+                export_timeout("OTEL_EXPORTER_OTLP_METRICS_TIMEOUT"),
+            ),
+        )
+    }
+
+    /// Like [`aws_cloudwatch`](Self::aws_cloudwatch), with the region, the
+    /// credentials, the base URL of the endpoints (`{base}/v1/traces` and
+    /// `{base}/v1/metrics`) and one timeout for each request, given
+    /// directly. Use it for a proxy or a private endpoint, or to test
+    /// against a local server.
+    ///
+    /// The SigV4 service name comes from the first label of the host, so
+    /// the base URL must start with `xray.` or `monitoring.` for AWS to
+    /// accept the signature. Call it from inside a tokio runtime.
+    pub fn aws_cloudwatch_at(
+        self,
+        region: impl Into<String>,
+        credentials: SharedCredentialsProvider,
+        base_url: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<Self, InitError> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| InitError::Aws(AwsError::NoRuntime))?;
+        let base_url = base_url.into();
+        let spans_url = format!("{base_url}/v1/traces");
+        let metrics_url = format!("{base_url}/v1/metrics");
+        self.cloudwatch_exporters(
+            runtime,
+            region.into(),
+            credentials,
+            (spans_url, timeout),
+            (metrics_url, timeout),
+        )
+    }
+
+    fn cloudwatch_exporters(
+        self,
+        runtime: tokio::runtime::Handle,
+        region: String,
+        credentials: SharedCredentialsProvider,
+        spans: (String, Duration),
+        metrics: (String, Duration),
+    ) -> Result<Self, InitError> {
+        let client = |timeout: Duration| -> Result<SigV4Client, InitError> {
+            let http = reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .timeout(timeout)
+                .build()
+                .map_err(|error| InitError::Aws(AwsError::Client(error)))?;
+            Ok(SigV4Client {
+                http,
+                credentials: credentials.clone(),
+                region: region.clone(),
+                runtime: runtime.clone(),
+            })
         };
-        let spans = opentelemetry_otlp::SpanExporter::builder()
+        let spans_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .with_http_client(client.clone())
+            .with_http_client(client(spans.1)?)
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(format!("https://xray.{region}.amazonaws.com/v1/traces"))
+            .with_endpoint(spans.0)
             .build()
             .map_err(InitError::SpanExporter)?;
-        let metrics = opentelemetry_otlp::MetricExporter::builder()
+        let metrics_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
-            .with_http_client(client)
+            .with_http_client(client(metrics.1)?)
             .with_protocol(opentelemetry_otlp::Protocol::HttpBinary)
-            .with_endpoint(format!(
-                "https://monitoring.{region}.amazonaws.com/v1/metrics"
-            ))
+            .with_endpoint(metrics.0)
             .build()
             .map_err(InitError::MetricExporter)?;
-        Ok(self.span_exporter(spans).metric_exporter(metrics))
+        Ok(self
+            .span_exporter(spans_exporter)
+            .metric_exporter(metrics_exporter))
     }
 }
