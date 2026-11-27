@@ -65,7 +65,7 @@ mod transport;
 
 pub use history::{DEFAULT_HISTORY_TOKENS, DEFAULT_MAX_CONTEXTS};
 pub use server::{BuildError, DEFAULT_MAX_CONCURRENT_CALLS, DEFAULT_MAX_RUN_DURATION, McpServer};
-pub use transport::{MCP_PATH, ServeError};
+pub use transport::{DEFAULT_MAX_REQUEST_BYTES, MCP_PATH, ServeError};
 
 /// The Axum version [`McpServer::into_router`] builds with, for `axum::serve`.
 pub use axum;

@@ -19,7 +19,20 @@ pub const MCP_PATH: &str = "/mcp";
 /// Why a server stopped serving.
 pub type ServeError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The largest HTTP request body by default, in bytes: the limit the MCP SDK
+/// already applied (4 MiB). A larger POST gets 413 Payload Too Large.
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
 impl McpServer {
+    /// Refuse HTTP request bodies over `bytes` with 413 Payload Too Large,
+    /// before they are parsed. Defaults to [`DEFAULT_MAX_REQUEST_BYTES`].
+    /// HTTP only: over stdio there is no request body to limit.
+    #[must_use]
+    pub fn max_request_bytes(mut self, bytes: usize) -> Self {
+        self.max_request_bytes = bytes;
+        self
+    }
+
     /// Require `Authorization: Bearer <token>` on the HTTP endpoint; calls
     /// without it get HTTP 401. (Over stdio the client launched the server
     /// itself, so there is nothing to check.)
@@ -79,7 +92,8 @@ impl McpServer {
             .bearer
             .as_ref()
             .map(|token| format!("Bearer {token}").into());
-        let mut config = StreamableHttpServerConfig::default();
+        let mut config = StreamableHttpServerConfig::default()
+            .with_max_request_body_bytes(self.max_request_bytes);
         if let Some(hosts) = self.allowed_hosts.clone() {
             config = config.with_allowed_hosts(hosts);
         }

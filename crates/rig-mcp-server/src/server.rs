@@ -35,6 +35,7 @@ use crate::history::{
     DEFAULT_HISTORY_TOKENS, DEFAULT_MAX_CONTEXTS, HistoryStore, InMemory, Persistent,
     valid_context_id,
 };
+use crate::transport::DEFAULT_MAX_REQUEST_BYTES;
 
 /// How many calls run at once by default; more are answered as busy.
 pub const DEFAULT_MAX_CONCURRENT_CALLS: usize = 32;
@@ -80,6 +81,7 @@ pub struct McpServer {
     max_run: Duration,
     pub(crate) bearer: Option<String>,
     pub(crate) allowed_hosts: Option<Vec<String>>,
+    pub(crate) max_request_bytes: usize,
 }
 
 struct Entry {
@@ -109,6 +111,7 @@ impl McpServer {
             max_run: DEFAULT_MAX_RUN_DURATION,
             bearer: None,
             allowed_hosts: None,
+            max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
         }
     }
 

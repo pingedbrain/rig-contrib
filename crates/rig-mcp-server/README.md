@@ -133,6 +133,7 @@ async fn over_transport(server: McpServer) -> Result<(), ServeError> {
 Over HTTP the endpoint answers only to `localhost`, `127.0.0.1` and `::1` by default,
 which keeps a local server safe from DNS rebinding; set `allowed_hosts` to the public
 host name when deploying. With `bearer_token`, calls without the token get HTTP 401.
+A request body over `max_request_bytes` (4 MiB by default) gets HTTP 413.
 
 ### In Claude Code
 

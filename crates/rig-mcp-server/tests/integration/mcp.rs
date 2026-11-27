@@ -353,6 +353,36 @@ async fn http_needs_the_bearer_token() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn http_refuses_a_body_over_the_limit_with_413() -> anyhow::Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/mcp", listener.local_addr()?);
+    let app = McpServer::new("test")
+        .tool(Add)
+        .max_request_bytes(1024)
+        .into_router()?;
+    tokio::spawn(async move { rig_mcp_server::axum::serve(listener, app).await });
+    let post = |body: serde_json::Value| {
+        reqwest::Client::new()
+            .post(&url)
+            .header("accept", "application/json, text/event-stream")
+            .json(&body)
+            .send()
+    };
+
+    let initialize = |padding: &str| {
+        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "test", "version": "0"}, "padding": padding}})
+    };
+    let small = post(initialize("")).await?;
+    ensure!(small.status().is_success(), "{}", small.status());
+
+    let large = post(initialize(&"x".repeat(2048))).await?;
+    ensure!(large.status() == 413, "{}", large.status());
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_rig_agent_uses_the_served_tools_through_rig_rmcp() -> anyhow::Result<()> {
     // Rig -> MCP -> Rig: a local agent calls the served `add` through
     // rig-rmcp, Rig's own MCP client.
