@@ -9,4 +9,5 @@
 mod contract;
 mod history;
 mod limits;
+mod ping;
 mod summary;
