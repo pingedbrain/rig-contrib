@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Tool results: `ToolCall` has a `result` field, the text the tool returned (cut to 4 KiB, marked `[truncated]`), filled by the agent target from the matching tool result (by call id). The faithfulness judge sees the results. `result` is left out of JSON when absent, so existing JSON is unchanged; AgentCore still records no tool calls.
 - Multi-turn cases: a case with `turns` (a list of user messages) instead of `input` is sent
   turn by turn on one conversation. The agent target keeps the history between turns, the
   AgentCore target reuses one runtime session, and the evaluators score the last answer with the

@@ -27,7 +27,8 @@ pub struct Verdict {
 /// [`goal_success`](Self::goal_success)).
 ///
 /// The judge sees the rubric, the case's input, expected answer and
-/// assertions (when it has them), the tool calls and the answer, and returns
+/// assertions (when it has them), the tool calls with their recorded results
+/// and the answer, and returns
 /// a [`Verdict`] as structured output. The score is clamped to 0..=1 and
 /// passes at the threshold (0.5 unless set); the reasoning is the
 /// explanation.
@@ -48,7 +49,7 @@ Do not reward length or tone on their own.";
 
 /// The rubric of [`LlmJudge::faithfulness`].
 const FAITHFULNESS: &str = "\
-Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made, the expected answer and the assertions. Tool outputs are not shown, so do not mark a claim unsupported only because its source is not shown.
+Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made with the results they returned (when recorded), the expected answer and the assertions. A tool result may be cut short. Where a tool's result is not recorded, do not mark a claim unsupported only because its source is not shown.
 - 1: every factual claim in the answer is supported by the evidence.
 - 0.5: most claims are supported, but one claim is unsupported or only partly supported.
 - 0: the answer contradicts the evidence, or most of its factual claims are unsupported by it.
@@ -87,8 +88,8 @@ impl LlmJudge {
 
     /// A preset judge named `faithfulness`: whether the answer states only
     /// what the transcript, the tool calls and the case's references support,
-    /// with no invented facts. Tool outputs are not in a trial, so the judge
-    /// sees the tool calls but not their results. Passes at 0.5 unless set.
+    /// with no invented facts. The judge sees the tool calls and the results
+    /// the target recorded for them. Passes at 0.5 unless set.
     pub fn faithfulness(agent: Agent) -> Self {
         Self::named("faithfulness", agent, FAITHFULNESS)
     }
@@ -141,6 +142,9 @@ impl LlmJudge {
             prompt.push_str("\nTool calls the agent made:\n");
             for call in &trial.tool_calls {
                 let _ = writeln!(prompt, "- {}({})", call.name, call.args);
+                if let Some(result) = &call.result {
+                    let _ = writeln!(prompt, "  Result: {}", result.replace('\n', "\n  "));
+                }
             }
         }
         let _ = write!(

@@ -52,6 +52,32 @@ async fn a_verdict_above_the_threshold_passes_with_the_reasoning() {
 }
 
 #[tokio::test]
+async fn the_faithfulness_prompt_carries_the_tool_results() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 1, "reasoning": "Matches the tool."}"#,
+    )]);
+    let agent = AgentBuilder::new(model.clone()).build();
+    let mut trial = Trial::new("weather", 1, "It is sunny in Lisbon.");
+    trial.tool_calls = vec![
+        ToolCall::new("weather", json!({"city": "Lisbon"})).with_result("Sunny, 24 degrees"),
+        ToolCall::new("clock", json!({})),
+    ];
+    LlmJudge::faithfulness(agent)
+        .evaluate(&Case::new("weather", "Weather in Lisbon?"), &trial)
+        .await
+        .expect("a verdict");
+
+    let request = model.requests().into_iter().next().expect("one request");
+    let sent = serde_json::to_string(&request.chat_history).expect("json");
+    assert!(sent.contains("Result: Sunny, 24 degrees"), "{sent}");
+    assert!(sent.contains("clock({})"), "{sent}");
+    assert!(
+        sent.contains("Where a tool's result is not recorded"),
+        "the rubric lacks the no-source rule"
+    );
+}
+
+#[tokio::test]
 async fn a_verdict_below_the_threshold_fails() {
     let (judge, _) = judge(r#"{"score": 0.4, "reasoning": "Rude."}"#);
     let score = judge
@@ -213,7 +239,7 @@ async fn faithfulness_sends_the_transcript_and_tool_calls_and_parses_the_score()
     let sent = sent(&model);
     for part in [
         "Score whether the answer is faithful",
-        "Tool outputs are not shown",
+        "Where a tool's result is not recorded",
         "lookup_fare",
         "LIS-OPO",
         "How much is the train?",
