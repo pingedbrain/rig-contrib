@@ -4,6 +4,10 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- `serve()` fails with `ServeError::InvalidPort` when `PORT` is set but is not a port number. It
+  used to serve on 8080 without a word. Behavior change: an app that sets a bad `PORT` now exits
+  at startup with a message that quotes the value. `ServeError` is `#[non_exhaustive]`, so the new
+  variant is not a breaking change. A bind failure keeps its `could not listen on <address>` message.
 - README: "Verified on AWS" is rewritten to stand alone. It lists the verified deployment and gives the public steps (ARM64 image, ECR, execution role, runtime, invocation, Transaction Search) with the AWS CLI. The image is built from `deploy/Dockerfile`, which the crate does not publish.
 - `AgentCoreApp::spawn_task(future)` runs background work on Tokio, and `AgentCoreApp::track_task()`
   returns a `BusyGuard` for work the app runs itself. While either is open, `/ping` answers

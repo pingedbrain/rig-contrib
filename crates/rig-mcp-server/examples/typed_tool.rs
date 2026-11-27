@@ -28,12 +28,14 @@
 //! npx @modelcontextprotocol/inspector cargo run -p rig-mcp-server --example typed_tool
 //! ```
 
+use anyhow::Context as _;
 use rig_core::completion::ToolAnnotations;
 use rig_core::tool::{Tool, ToolContext, ToolExecutionError, args_schema};
 use rig_mcp_server::McpServer;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::process::ExitCode;
 
 /// A temperature scale.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
@@ -109,18 +111,43 @@ impl Tool for ConvertTemperature {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), rig_mcp_server::ServeError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     let mut server = McpServer::new("typed-tools").tool(ConvertTemperature);
 
     if std::env::args().nth(1).as_deref() != Some("http") {
-        return server.serve_stdio().await;
+        return server
+            .serve_stdio()
+            .await
+            .map_err(|error| anyhow::anyhow!(error));
     }
     if let Ok(token) = std::env::var("MCP_TOKEN") {
         server = server.bearer_token(token);
     }
-    let port: u16 = std::env::var("PORT").map_or(Ok(3400), |port| port.parse())?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let port = port(3400)?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| format!("could not listen on 127.0.0.1:{port}"))?;
     eprintln!("typed tools MCP server at http://127.0.0.1:{port}/mcp");
     rig_mcp_server::axum::serve(listener, server.into_router()?).await?;
     Ok(())
+}
+
+/// `PORT`, or `default` when it is not set. A value that is not a port number is an error.
+fn port(default: u16) -> anyhow::Result<u16> {
+    match std::env::var("PORT") {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("PORT must be a port number from 0 to 65535, got {value:?}")),
+        Err(_) => Ok(default),
+    }
 }
