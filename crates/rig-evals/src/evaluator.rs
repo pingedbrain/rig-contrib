@@ -120,16 +120,10 @@ pub enum EvalError {
         /// The missing field: `expected` or `trajectory`.
         field: &'static str,
     },
-    /// The judge model did not return a verdict.
+    /// The judge model did not return a verdict. `LlmJudge` reports this as
+    /// a failed score labelled `error` (keeping the tokens it spent) instead.
     #[error("the judge returned no verdict: {0}")]
     Judge(#[from] StructuredOutputError),
-    /// The judge's reply stopped at its output-token cap before the verdict
-    /// was complete: raise the judge's `max_tokens`.
-    #[error("the judge returned no verdict: the reply was truncated at max_tokens{}", .max_tokens.map(|n| format!(" ({n})")).unwrap_or_default())]
-    JudgeTruncated {
-        /// The cap the judge ran with, when the agent set one.
-        max_tokens: Option<u64>,
-    },
     /// Any other failure, such as a remote evaluator's.
     #[error(transparent)]
     Other(BoxError),

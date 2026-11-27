@@ -302,7 +302,9 @@ pub struct Trajectory {
 
 /// Passes when the tool calls match the case's `trajectory` in `mode`. The
 /// value is the share of expected calls matched. A case without a
-/// trajectory is an [`EvalError::MissingReference`].
+/// trajectory is an [`EvalError::MissingReference`], unless
+/// [`not_applicable_without_reference`](Trajectory::not_applicable_without_reference)
+/// is set, when it is not applicable (N/A).
 pub fn trajectory(mode: TrajectoryMode) -> Trajectory {
     Trajectory {
         mode,
