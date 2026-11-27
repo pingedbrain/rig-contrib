@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- Added `A2aServer::allowed_hosts`, an opt-in check on the `Host` header. A request, card included, whose host is not listed gets HTTP 403 before any agent work, which guards a local server without a bearer token against DNS rebinding. Unset, nothing changes.
+
 ## 0.47.4 (2026-11-27)
 
 - Client limits on what a remote agent sends. The agent card is read up to 1 MiB and refused beyond that; a v0.3 `message/send` reply is capped at 16 MiB. A v0.3 event stream is split into events in one pass, and an event longer than 16 MiB ends the stream with an error instead of growing the buffer. A v0.3 error code outside the `i32` range becomes -32603 instead of wrapping.

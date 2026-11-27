@@ -13,6 +13,7 @@ use a2a_server::{
     DefaultRequestHandler, InMemoryTaskStore, PushConfigStore, StaticAgentCard, TaskStore,
 };
 use axum::extract::{Request, State};
+use axum::http::uri::Authority;
 use axum::http::{StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -46,6 +47,7 @@ pub struct A2aServer<S = InMemoryTaskStore> {
     store: S,
     url: String,
     bearer: Option<String>,
+    allowed_hosts: Option<Vec<String>>,
     max_request_bytes: usize,
     push: PushSettings,
 }
@@ -69,6 +71,7 @@ impl A2aServer {
             store: InMemoryTaskStore::new(),
             url,
             bearer: None,
+            allowed_hosts: None,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             push: PushSettings::new(),
         }
@@ -176,6 +179,26 @@ impl<S: TaskStore> A2aServer<S> {
     #[must_use]
     pub fn max_run_duration(mut self, max: std::time::Duration) -> Self {
         self.executor = self.executor.max_run_duration(max);
+        self
+    }
+
+    /// Answer only requests whose `Host` header names one of `hosts`, and
+    /// refuse the rest with HTTP 403 before any agent work. This guards a
+    /// local server against DNS rebinding, where a web page on another site
+    /// is pointed at `localhost`. Cards are checked too.
+    ///
+    /// An entry is a host name such as `agent.example.com`, which matches
+    /// any port, or `host:port`, which matches only that port. Host names
+    /// compare without case. An empty list refuses every request.
+    ///
+    /// Off by default: without this call the `Host` header is not checked.
+    #[must_use]
+    pub fn allowed_hosts<I, H>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = H>,
+        H: Into<String>,
+    {
+        self.allowed_hosts = Some(hosts.into_iter().map(Into::into).collect());
         self
     }
 
@@ -316,6 +339,7 @@ impl<S: TaskStore> A2aServer<S> {
             store,
             url: self.url,
             bearer: self.bearer,
+            allowed_hosts: self.allowed_hosts,
             max_request_bytes: self.max_request_bytes,
             push: self.push,
         }
@@ -368,13 +392,65 @@ impl<S: TaskStore> A2aServer<S> {
                 self.max_request_bytes,
             ));
         // The cards are routed after the guard, so discovery needs no token.
+        let host_guard = self.allowed_hosts.map(Arc::new);
+        // Outermost, so a refused request never reaches an agent or a card.
         calls
             .merge(agent_card_router(Arc::new(StaticAgentCard::new(card))))
             .route(
                 &format!("{V03_PATH}{}", a2a_server::WELL_KNOWN_AGENT_CARD_PATH),
                 axum::routing::get(move || async move { axum::Json(v03_card) }),
             )
+            .layer(axum::middleware::from_fn_with_state(host_guard, check_host))
     }
+}
+
+/// Answers 403 when `Host` is not one of the allowed hosts, or passes every
+/// request when no list is set.
+async fn check_host(
+    State(allowed): State<Option<Arc<Vec<String>>>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let Some(allowed) = allowed else {
+        return next.run(request).await;
+    };
+    let given = request
+        .headers()
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok());
+    if host_allowed(&allowed, given) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"Host not allowed"}}"#,
+        )
+            .into_response()
+    }
+}
+
+/// Matches a `Host` value against the list the way rmcp does for MCP: the
+/// host compares without case or brackets, and an entry without a port
+/// matches any port.
+fn host_allowed(allowed: &[String], given: Option<&str>) -> bool {
+    let Some(given) = given.and_then(|value| Authority::try_from(value.trim()).ok()) else {
+        return false;
+    };
+    let host = normalize_host(given.host());
+    let port = given.port_u16();
+    allowed.iter().any(|entry| {
+        let entry = entry.trim();
+        let (entry_host, entry_port) = match Authority::try_from(entry) {
+            Ok(authority) => (normalize_host(authority.host()), authority.port_u16()),
+            Err(_) => (normalize_host(entry), None),
+        };
+        entry_host == host && entry_port.is_none_or(|entry_port| port == Some(entry_port))
+    })
+}
+
+fn normalize_host(host: &str) -> String {
+    host.trim_matches(['[', ']']).to_ascii_lowercase()
 }
 
 /// Answers 401 to a call without the expected `Authorization` header, or

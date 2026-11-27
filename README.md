@@ -64,6 +64,7 @@ Each cell is the builder method on that crate, with its default in brackets. `�
 | Request size limit | `max_request_bytes` (2 MiB) | `max_request_bytes` (4 MiB, HTTP only) | — | — | — | `max_request_bytes` (2 MiB) |
 | Content recording | — | — | — | — | — | `record_content` (false) |
 | Bearer token | `bearer_token` on `A2aServer` (none); `bearer_token` on `RemoteAgentBuilder` (none) | `bearer_token` (none, HTTP only) | — | — | — | — |
+| Host allowlist | `allowed_hosts` on `A2aServer` (none, HTTP 403 when set) | `allowed_hosts` (localhost, 127.0.0.1, ::1; HTTP only) | — | — | — | — |
 | Turn budget | — | — | `max_turns_per_agent` (8) | — | — | — |
 
 Session ids are spelled differently in each crate, so they are not a builder setting:
