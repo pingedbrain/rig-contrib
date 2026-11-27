@@ -66,7 +66,7 @@ use tracing_subscriber::{EnvFilter, Layer, Registry};
 #[cfg(feature = "aws")]
 pub use aws::AwsError;
 pub use propagation::{extract, inject};
-pub use session::{SESSION_ID, set_session};
+pub use session::{SESSION_ID, agent_span, set_session};
 
 /// The instrumentation scope of everything this crate exports. AWS Bedrock
 /// AgentCore reads spans whose scope starts with
