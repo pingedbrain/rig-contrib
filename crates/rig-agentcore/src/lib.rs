@@ -106,13 +106,6 @@ pub enum ServeError {
         #[source]
         source: std::io::Error,
     },
-    /// `PORT` is set but is not a port number. The app does not fall back to
-    /// the default: AgentCore would not reach it there.
-    #[error("PORT must be a port number from 0 to 65535, got {value:?}")]
-    InvalidPort {
-        /// The value as set.
-        value: String,
-    },
     /// Serving failed.
     #[error("serving failed: {0}")]
     Serve(#[source] std::io::Error),
@@ -347,9 +340,9 @@ impl AgentCoreApp {
 
     /// Serve on `0.0.0.0` at `PORT` (default 8080, what AgentCore sends to)
     /// until the process gets Ctrl-C or SIGTERM. A `PORT` that is set but is
-    /// not a port number is [`ServeError::InvalidPort`].
+    /// not a port number logs a warning and serves on the default.
     pub async fn serve(self) -> Result<(), ServeError> {
-        let listener = listen(port_from_env(std::env::var("PORT"))?).await?;
+        let listener = listen(port_from_env(std::env::var("PORT"))).await?;
         axum::serve(listener, self.router())
             .with_graceful_shutdown(shutdown())
             .await
@@ -704,15 +697,21 @@ fn error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message, "status": "error"}))).into_response()
 }
 
-/// The port `PORT` names, or [`DEFAULT_PORT`] when it is not set.
-fn port_from_env(value: Result<String, std::env::VarError>) -> Result<u16, ServeError> {
-    match value {
-        Ok(value) => value.parse().map_err(|_| ServeError::InvalidPort { value }),
-        Err(std::env::VarError::NotPresent) => Ok(DEFAULT_PORT),
-        Err(std::env::VarError::NotUnicode(value)) => Err(ServeError::InvalidPort {
-            value: value.to_string_lossy().into_owned(),
-        }),
-    }
+/// The port `PORT` names, or [`DEFAULT_PORT`] when it is not set. A value
+/// that is not a port number warns and also gets [`DEFAULT_PORT`].
+fn port_from_env(value: Result<String, std::env::VarError>) -> u16 {
+    let value = match value {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return DEFAULT_PORT,
+        Err(std::env::VarError::NotUnicode(value)) => value.to_string_lossy().into_owned(),
+    };
+    value.parse().unwrap_or_else(|_| {
+        tracing::warn!(
+            port = %value,
+            "PORT is not a port number from 0 to 65535; serving on {DEFAULT_PORT} instead"
+        );
+        DEFAULT_PORT
+    })
 }
 
 /// Listen on every interface at `port`.
@@ -731,26 +730,15 @@ mod tests {
 
     #[test]
     fn the_port_comes_from_env_or_the_default() {
-        assert_eq!(port_from_env(Ok("3200".into())).ok(), Some(3200));
-        assert_eq!(
-            port_from_env(Err(VarError::NotPresent)).ok(),
-            Some(DEFAULT_PORT)
-        );
+        assert_eq!(port_from_env(Ok("3200".into())), 3200);
+        assert_eq!(port_from_env(Err(VarError::NotPresent)), DEFAULT_PORT);
     }
 
     #[test]
-    fn a_bad_port_is_an_error_that_quotes_the_value() {
+    fn a_bad_port_falls_back_to_the_default() {
         for bad in ["", "abc", "70000", "-1", " 8080"] {
-            assert!(
-                matches!(port_from_env(Ok(bad.into())), Err(ServeError::InvalidPort { value }) if value == bad),
-                "{bad:?} must not parse"
-            );
+            assert_eq!(port_from_env(Ok(bad.into())), DEFAULT_PORT, "{bad:?}");
         }
-        let message = port_from_env(Ok("abc".into())).err().map(|e| e.to_string());
-        assert_eq!(
-            message.as_deref(),
-            Some("PORT must be a port number from 0 to 65535, got \"abc\"")
-        );
     }
 
     #[tokio::test]
