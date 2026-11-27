@@ -9,14 +9,47 @@ Rig ships an MCP *client* (`rig-rmcp`, Rig agents using MCP tools). This crate i
 other direction: Rig agents *as* MCP tools.
 
 ```rust
-use rig_mcp_server::McpServer;
+use rig_agent::Agent;
+use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
+use rig_mcp_server::{McpServer, ServeError};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
-McpServer::new("my-agents")
-    .agent(research_agent)            // a Rig agent, as a tool
-    .typed_agent::<Ticket>(triager)   // answers with structured content
-    .tool(Calculate)                  // a plain Rig tool, no model
-    .serve_stdio()                    // for a client that launches this binary
-    .await?;
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Ticket { title: String, priority: String }
+
+/// Adds two numbers. A plain Rig tool: it runs without a model.
+struct Add;
+
+impl Tool for Add {
+    const NAME: &'static str = "add";
+    type Args = Value;
+    type Output = Value;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Add two numbers".into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}})
+    }
+
+    async fn call(&self, _: &mut ToolContext, args: Value) -> Result<Value, Self::Error> {
+        Ok(json!({"sum": args["a"].as_f64().unwrap_or(0.0) + args["b"].as_f64().unwrap_or(0.0)}))
+    }
+}
+
+async fn serve(research_agent: Agent, triager: Agent) -> Result<(), ServeError> {
+    McpServer::new("my-agents")
+        .agent(research_agent)            // a Rig agent, as a tool
+        .typed_agent::<Ticket>(triager)   // answers with structured content
+        .tool(Add)                        // a plain Rig tool, no model
+        .serve_stdio()                    // for a client that launches this binary
+        .await?;
+    Ok(())
+}
 ```
 
 ## What a client sees
@@ -34,16 +67,29 @@ stops.
 ## Transports
 
 ```rust
+use rig_mcp_server::{McpServer, ServeError};
+
 // stdio: a local client launches the binary. Stdout carries the protocol,
 // so log to stderr only.
-server.serve_stdio().await?;
+async fn over_stdio(server: McpServer) -> Result<(), ServeError> {
+    server.serve_stdio().await
+}
 
 // Streamable HTTP at /mcp, as an Axum router.
-let app = server.bearer_token(token).into_router()?;
-axum::serve(listener, app).await?;
+async fn over_http(
+    server: McpServer,
+    token: &str,
+    listener: tokio::net::TcpListener,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = server.bearer_token(token).into_router()?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
 
-// Any rmcp transport (an in-memory duplex in tests, a socket...).
-server.serve(transport).await?;
+// Any rmcp transport, such as a reader and writer pair or a socket.
+async fn over_transport(server: McpServer) -> Result<(), ServeError> {
+    server.serve((tokio::io::stdin(), tokio::io::stdout())).await
+}
 ```
 
 Over HTTP the endpoint answers only to `localhost`, `127.0.0.1` and `::1` by default,

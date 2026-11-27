@@ -50,3 +50,7 @@ pub use axum;
 pub use rig_memory;
 /// The MCP SDK this crate is built against.
 pub use rmcp;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}

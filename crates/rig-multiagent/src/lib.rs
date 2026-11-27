@@ -88,3 +88,7 @@ pub enum BuildError {
     #[error("max_turns_per_agent must be at least 1")]
     ZeroTurns,
 }
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}

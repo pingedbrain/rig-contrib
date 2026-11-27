@@ -12,10 +12,16 @@ AgentCore runs an agent as an ARM64 container serving its HTTP protocol contract
 | `GET /ping` | `{"status": "Healthy"}`. |
 
 ```rust
-rig_agentcore::AgentCoreApp::new(agent)
-    .record_content(true) // prompts and replies on the spans, for AgentCore Evaluations
-    .serve()              // 0.0.0.0:$PORT, default 8080; stops on SIGTERM
-    .await?;
+use rig_agent::Agent;
+use rig_agentcore::AgentCoreApp;
+
+async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    AgentCoreApp::new(agent)
+        .record_content(true) // prompts and replies on the spans, for AgentCore Evaluations
+        .serve()              // 0.0.0.0:$PORT, default 8080; stops on SIGTERM
+        .await?;
+    Ok(())
+}
 ```
 
 - **Sessions:** the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header names the
@@ -35,9 +41,14 @@ rig_agentcore::AgentCoreApp::new(agent)
   conversation and the window only limits what is sent.
 
   ```rust
-  AgentCoreApp::new(agent)
-      .history_store(rig_memory::DirStore::open("/var/lib/agent/sessions")?)
-      .history_window(rig_memory::recent::TokenBudget::new(16_000));
+  use rig_agent::Agent;
+  use rig_agentcore::AgentCoreApp;
+
+  fn sessions(agent: Agent) -> Result<AgentCoreApp, rig_memory::SessionError> {
+      Ok(AgentCoreApp::new(agent)
+          .history_store(rig_memory::DirStore::open("/var/lib/agent/sessions")?)
+          .history_window(rig_memory::recent::TokenBudget::new(16_000)))
+  }
   ```
 
   `DirStore` needs rig-memory's `fs` feature: enable it in your own `Cargo.toml`

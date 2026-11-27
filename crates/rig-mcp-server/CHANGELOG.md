@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- README snippets are compile-checked as doctests, so the examples cannot rot.
+
 ## 0.47.3 (2026-11-27)
 
 - `examples/typed_tool`: a typed Rig tool (arguments derived from a struct, schema

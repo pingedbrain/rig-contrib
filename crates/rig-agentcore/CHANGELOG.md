@@ -4,6 +4,7 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- README snippets are compile-checked as doctests, so the examples cannot rot.
 - `AgentCoreApp::summarize_history(summarizer, keep_recent, trigger_messages)`: opt-in. Past
   `trigger_messages`, a session's older messages become one summary, its first message: a user
   message in rig-memory's compaction frame, made by `summarizer` (an agent without tools). The

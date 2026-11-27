@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- README snippets are compile-checked as doctests; the conversation example awaits the prompt inside an async block before `.instrument(span)`.
+
 ## 0.47.3 (2026-11-27)
 
 - Example `console`: the README flow with a scripted model, printing spans, or sending them to an OTLP endpoint if one is set.

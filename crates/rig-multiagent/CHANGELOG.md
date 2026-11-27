@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- README snippets are compile-checked as doctests, so the examples cannot rot.
+
 ## 0.47.3 (2026-11-27)
 
 - Fix: the agent a handoff reaches is now given what the agents before it wrote and read
