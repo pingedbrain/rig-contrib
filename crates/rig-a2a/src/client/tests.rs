@@ -180,3 +180,30 @@ fn tool_names_are_provider_safe() {
     assert_eq!(tool_name("ñandú"), "and");
     assert_eq!(tool_name(&"x".repeat(100)).len(), 64);
 }
+
+#[tokio::test]
+async fn an_oversized_agent_card_is_refused() -> anyhow::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else {
+            return;
+        };
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        let body = vec![b' '; MAX_CARD_BYTES + 1];
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        let _ = socket.write_all(head.as_bytes()).await;
+        let _ = socket.write_all(&body).await;
+    });
+    let err = RemoteAgent::builder(url).connect().await.err();
+    anyhow::ensure!(
+        matches!(err, Some(RemoteError::Card(ref msg)) if msg.contains("larger than")),
+        "{err:?}"
+    );
+    Ok(())
+}

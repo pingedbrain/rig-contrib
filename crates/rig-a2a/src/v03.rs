@@ -33,6 +33,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use futures::StreamExt;
 use futures::stream::BoxStream;
+
+use crate::client::read_capped;
 use serde_json::{Value, json};
 
 /// Where the v0.3 surface is mounted under the server's base URL.
@@ -435,10 +437,16 @@ pub(crate) async fn send(
     message: &Message,
 ) -> Result<StreamResponse, crate::RemoteError> {
     let params = json!({"message": message_json(message), "configuration": {"blocking": true}});
-    let frame: Value = call(http, url, bearer, "message/send", params)
-        .await?
-        .json()
-        .await?;
+    let response = call(http, url, bearer, "message/send", params).await?;
+    let Some(body) = read_capped(response, MAX_REPLY_BYTES).await? else {
+        return Err(A2AError::new(
+            INVALID_PARAMS,
+            format!("reply longer than {MAX_REPLY_BYTES} bytes"),
+        )
+        .into());
+    };
+    let frame: Value = serde_json::from_slice(&body)
+        .map_err(|e| A2AError::new(INVALID_PARAMS, format!("bad reply: {e}")))?;
     Ok(response_from_frame(&frame)?)
 }
 
@@ -454,21 +462,68 @@ pub(crate) async fn stream(
     let response = call(http, url, bearer, "message/stream", params).await?;
     Ok(async_stream::try_stream! {
         let mut bytes = response.bytes_stream();
-        let mut buffer: Vec<u8> = Vec::new();
+        let mut framer = SseFramer::default();
         while let Some(chunk) = bytes.next().await {
-            // JSON escapes carriage returns, so dropping them normalizes CRLF framing.
-            buffer.extend(chunk?.iter().filter(|&&byte| byte != b'\r'));
-            while let Some(end) = buffer.windows(2).position(|pair| pair == b"\n\n") {
-                let block: Vec<u8> = buffer.drain(..end + 2).collect();
-                if let Some(data) = sse_data(&block) {
-                    let frame: Value = serde_json::from_str(&data)
-                        .map_err(|e| A2AError::new(INVALID_PARAMS, format!("bad SSE frame: {e}")))?;
-                    yield response_from_frame(&frame)?;
-                }
+            for data in framer.push(&chunk?)? {
+                let frame: Value = serde_json::from_str(&data)
+                    .map_err(|e| A2AError::new(INVALID_PARAMS, format!("bad SSE frame: {e}")))?;
+                yield response_from_frame(&frame)?;
             }
         }
     }
     .boxed())
+}
+
+/// Largest reply a v0.3 agent may send to `message/send`.
+const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Largest event a v0.3 agent may send before its blank line. A longer one
+/// ends the stream with an error instead of growing the buffer.
+const MAX_PENDING_EVENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Cuts a server-sent event stream into the data payloads of its events.
+#[derive(Default)]
+struct SseFramer {
+    /// Bytes after the last complete event, without carriage returns.
+    pending: Vec<u8>,
+    /// How much of `pending` has already been searched for a blank line.
+    scanned: usize,
+}
+
+impl SseFramer {
+    /// Add one chunk of the stream; the data of each event it completes.
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, A2AError> {
+        // JSON escapes carriage returns, so dropping them normalizes CRLF framing.
+        self.pending
+            .extend(chunk.iter().filter(|&&byte| byte != b'\r'));
+        let mut events = Vec::new();
+        loop {
+            let from = self.scanned;
+            let blank = self
+                .pending
+                .get(from..)
+                .and_then(|tail| tail.windows(2).position(|pair| pair == b"\n\n"));
+            match blank {
+                Some(at) => {
+                    let block: Vec<u8> = self.pending.drain(..from + at + 2).collect();
+                    self.scanned = 0;
+                    events.extend(sse_data(&block));
+                }
+                None => {
+                    // The last byte may be the first half of a blank line.
+                    self.scanned = self.pending.len().saturating_sub(1);
+                    break;
+                }
+            }
+        }
+        if self.pending.len() > MAX_PENDING_EVENT_BYTES {
+            return Err(A2AError::new(
+                INVALID_PARAMS,
+                format!("SSE event longer than {MAX_PENDING_EVENT_BYTES} bytes"),
+            ));
+        }
+        Ok(events)
+    }
 }
 
 async fn call(
@@ -505,8 +560,13 @@ fn sse_data(block: &[u8]) -> Option<String> {
 
 fn response_from_frame(frame: &Value) -> Result<StreamResponse, A2AError> {
     if let Some(error) = frame.get("error") {
+        // A code outside i32 from a remote agent falls back to the generic internal error.
+        let code = error["code"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok())
+            .unwrap_or(-32603);
         return Err(A2AError::new(
-            error["code"].as_i64().unwrap_or(-32603) as i32,
+            code,
             error["message"].as_str().unwrap_or("unknown error"),
         ));
     }
