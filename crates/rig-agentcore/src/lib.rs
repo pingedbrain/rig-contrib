@@ -48,6 +48,7 @@ use futures::StreamExt;
 use rig_agent::Agent;
 use rig_agent::agent::MultiTurnStreamItem;
 use rig_core::streaming::{Item, StreamEvent};
+use rig_memory::recent::{Recent, TokenBudget};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -66,8 +67,7 @@ pub const DEFAULT_PORT: u16 = 8080;
 /// when the app runs elsewhere.
 pub const DEFAULT_MAX_SESSIONS: usize = 1000;
 
-/// How many tokens of a session's history an app keeps by default, counted
-/// as [`rig_memory::HeuristicTokenCounter`] counts them.
+/// How many tokens of history a session keeps by default.
 pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
 
 /// Why the app stopped serving.
@@ -106,7 +106,10 @@ impl AgentCoreApp {
         Self {
             inner: Arc::new(Inner {
                 agent,
-                sessions: Sessions::new(DEFAULT_MAX_SESSIONS, DEFAULT_HISTORY_TOKENS),
+                sessions: Sessions::new(
+                    DEFAULT_MAX_SESSIONS,
+                    Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
+                ),
                 record_content: false,
             }),
         }
@@ -116,17 +119,21 @@ impl AgentCoreApp {
     #[must_use]
     pub fn max_sessions(self, max: usize) -> Self {
         self.rebuild(|inner| {
-            inner.sessions = Sessions::new(max, inner.sessions.history_tokens());
+            inner.sessions = Sessions::new(max, inner.sessions.window());
         })
     }
 
-    /// Keep at most `tokens` tokens of each session's history, forgetting the
-    /// oldest messages first (never splitting a tool call from its result).
-    /// Defaults to [`DEFAULT_HISTORY_TOKENS`].
+    /// Which newest messages of a session each invocation sends the model,
+    /// such as `rig_memory::recent::TokenBudget::new(8_000)` or
+    /// `LastMessages(20)`. Messages the window no longer keeps are forgotten,
+    /// not only left out of the request. Defaults to
+    /// [`DEFAULT_HISTORY_TOKENS`] tokens. A tool result is never sent without
+    /// its call. An empty window (`TokenBudget::new(0)`, `LastMessages(0)`)
+    /// keeps nothing, so every invocation starts without history.
     #[must_use]
-    pub fn max_history_tokens(self, tokens: usize) -> Self {
+    pub fn history_window(self, window: impl Recent + 'static) -> Self {
         self.rebuild(|inner| {
-            inner.sessions = Sessions::new(inner.sessions.capacity(), tokens);
+            inner.sessions = Sessions::new(inner.sessions.capacity(), Arc::new(window));
         })
     }
 
@@ -143,10 +150,7 @@ impl AgentCoreApp {
             Ok(inner) => inner,
             Err(shared) => Inner {
                 agent: shared.agent.clone(),
-                sessions: Sessions::new(
-                    shared.sessions.capacity(),
-                    shared.sessions.history_tokens(),
-                ),
+                sessions: Sessions::new(shared.sessions.capacity(), shared.sessions.window()),
                 record_content: shared.record_content,
             },
         };
