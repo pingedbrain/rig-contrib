@@ -12,7 +12,22 @@ use serde_json::json;
 
 type Reply = std::pin::Pin<Box<dyn Future<Output = Result<String, NodeError>> + Send>>;
 
+/// Keeps two dispatchers registered for the whole binary. With only one,
+/// tracing-core computes a callsite's interest from the registering thread's
+/// own default, so another test's span-less first hit caches "never" for
+/// every thread, and a later scoped subscriber here silently misses it. With
+/// two registered, interest is computed from all of them, whichever thread
+/// registers the callsite.
+fn pin_global_default() {
+    static PIN: std::sync::Once = std::sync::Once::new();
+    PIN.call_once(|| {
+        let _ =
+            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
+    });
+}
+
 async fn capture<F: Future<Output = ()>>(body: impl FnOnce() -> F) -> Vec<SpanData> {
+    pin_global_default();
     let spans = InMemorySpanExporter::default();
     let (telemetry, subscriber) = rig_otel::Telemetry::builder()
         .span_exporter(spans.clone())
