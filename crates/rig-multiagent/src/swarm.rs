@@ -137,8 +137,9 @@ impl SwarmBuilder {
     /// How many model calls one agent's run may make, counting the first call
     /// and every follow-up after a tool call. Applies to each agent run; an
     /// agent whose own `default_max_turns` is higher keeps its own. Defaults
-    /// to 8. A handoff ends the run at once, so the budget only has to cover
-    /// the tool calls an agent makes before it answers or hands off.
+    /// to 8; zero fails the build with [`BuildError::ZeroTurns`]. A handoff
+    /// ends the run at once, so the budget only has to cover the tool calls an
+    /// agent makes before it answers or hands off.
     pub fn max_turns_per_agent(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
         self
@@ -189,6 +190,9 @@ impl SwarmBuilder {
     pub fn build(self) -> Result<Swarm, BuildError> {
         if self.agents.is_empty() {
             return Err(BuildError::Empty);
+        }
+        if self.max_turns == 0 {
+            return Err(BuildError::ZeroTurns);
         }
         let mut members: Vec<Member> = Vec::with_capacity(self.agents.len());
         for agent in self.agents {

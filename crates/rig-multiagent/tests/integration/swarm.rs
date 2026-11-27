@@ -426,3 +426,28 @@ async fn an_agent_keeps_a_higher_turn_budget_of_its_own() {
     assert_eq!(run.answer, "It has 3 columns.");
     assert_eq!(model.requests().len(), 3);
 }
+
+#[test]
+fn a_zero_turn_budget_does_not_build() {
+    let (solo, _) = agent("solo", "Does it all", vec![]);
+    let built = Swarm::builder().agent(solo).max_turns_per_agent(0).build();
+    assert_eq!(built.err(), Some(BuildError::ZeroTurns));
+}
+
+#[tokio::test]
+async fn one_turn_still_runs_handoffs_and_direct_answers() {
+    let (researcher, researcher_model) = bare("researcher", vec![handoff("coder", "Write it")]);
+    let (coder, coder_model) = bare("coder", vec![MockTurn::text("fn parse() {}")]);
+    let swarm = Swarm::builder()
+        .agent(researcher)
+        .agent(coder)
+        .max_turns_per_agent(1)
+        .build()
+        .expect("the builder is valid");
+
+    let run = swarm.run("Parse it").await.expect("the run succeeds");
+
+    assert_eq!(run.answer, "fn parse() {}");
+    assert_eq!(researcher_model.requests().len(), 1);
+    assert_eq!(coder_model.requests().len(), 1);
+}

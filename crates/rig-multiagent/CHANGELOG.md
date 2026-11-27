@@ -7,11 +7,13 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 - `examples/swarm_graph.rs`: the Swarm, streaming and Graph snippets, on scripted models
   with no key; `OPENROUTER_MODEL` (with `OPENROUTER_API_KEY`) runs them live.
 - `Swarm::max_turns_per_agent(n)` and `Graph::max_turns_per_agent(n)`: the model calls one
-  agent run may make, eight by default. An agent's own `default_max_turns` is kept when
-  it is higher. Behavior change: agents in a swarm or graph no longer stop at Rig's
-  default of one model call. A refused handoff or a tool call now gets its follow-up
-  answer instead of failing with `MaxTurns`. Set `max_turns_per_agent(1)` to get the old
-  limit.
+  agent run may make, eight by default; zero fails the build with `BuildError::ZeroTurns`.
+  An agent's own `default_max_turns` is kept when it is higher.
+- Behavior change, no API break: with Rig's budget of one, a run that made a tool call
+  other than a handoff ran the tool and then failed with `MaxTurns`. It now continues to
+  its answer. A handoff or a direct answer takes one model call under either budget, so
+  those runs make the same calls as before. Set `max_turns_per_agent(1)` to restore the
+  old limit.
 
 ## 0.47.2 (2026-11-26)
 

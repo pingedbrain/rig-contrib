@@ -164,8 +164,9 @@ impl GraphBuilder {
 
     /// How many model calls one agent node's run may make, counting the first
     /// call and every follow-up after a tool call. An agent whose own
-    /// `default_max_turns` is higher keeps its own. Defaults to 8. Nodes that
-    /// are swarms or functions are not affected.
+    /// `default_max_turns` is higher keeps its own. Defaults to 8; zero fails
+    /// the build with [`BuildError::ZeroTurns`]. Nodes that are swarms or
+    /// functions are not affected.
     pub fn max_turns_per_agent(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
         self
@@ -198,6 +199,9 @@ impl GraphBuilder {
     pub fn build(self) -> Result<Graph, BuildError> {
         if self.nodes.is_empty() {
             return Err(BuildError::Empty);
+        }
+        if self.max_turns == 0 {
+            return Err(BuildError::ZeroTurns);
         }
         let mut nodes: Vec<GraphNode> = Vec::with_capacity(self.nodes.len());
         for (id, node) in self.nodes {

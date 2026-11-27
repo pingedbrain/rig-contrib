@@ -84,4 +84,7 @@ pub enum BuildError {
     /// A graph with a cycle and no bound on how many times nodes may run.
     #[error("the graph has a cycle; bound it with max_node_executions()")]
     UnboundedCycle,
+    /// A turn budget of zero: an agent could not make its first model call.
+    #[error("max_turns_per_agent must be at least 1")]
+    ZeroTurns,
 }

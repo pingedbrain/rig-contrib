@@ -328,6 +328,17 @@ async fn swarms_and_graphs_nest() {
 }
 
 #[test]
+fn a_zero_turn_budget_does_not_build() {
+    let model = MockCompletionModel::from_turns([]);
+    let research = AgentBuilder::new(model).name("research").build();
+    let built = Graph::builder()
+        .node("research", research)
+        .max_turns_per_agent(0)
+        .build();
+    assert_eq!(built.err(), Some(BuildError::ZeroTurns));
+}
+
+#[test]
 fn bad_graphs_do_not_build() {
     let node = || sleeping("", 0);
     assert_eq!(Graph::builder().build().err(), Some(BuildError::Empty));
