@@ -1,8 +1,11 @@
 //! A model as the evaluator.
 
 use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 
 use rig_agent::Agent;
+use rig_agent::agent::{AgentHook, HookContext, ModelTurnAction, ModelTurnFinished};
+use rig_core::completion::{FinishReason, Usage};
 use rig_core::wasm_compat::WasmBoxedFuture;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -79,6 +82,44 @@ impl LlmJudge {
     }
 }
 
+/// What the judge's turns reported: whether the latest turn stopped at its
+/// token cap (and the cap), and the usage of every turn.
+#[derive(Debug, Clone, Default)]
+struct Watch {
+    /// `Some(cap)` when the last turn stopped for length, else `None`.
+    cut_off: Option<Option<u64>>,
+    /// Usage summed over every turn, including retried ones.
+    usage: Usage,
+}
+
+impl Watch {
+    fn observe(
+        &mut self,
+        finish_reason: Option<&FinishReason>,
+        max_tokens: Option<u64>,
+        usage: Usage,
+    ) {
+        self.cut_off = matches!(finish_reason, Some(FinishReason::Length)).then_some(max_tokens);
+        self.usage += usage;
+    }
+}
+
+/// Feeds each judge turn to a [`Watch`].
+struct Observe(Arc<Mutex<Watch>>);
+
+impl AgentHook for Observe {
+    async fn on_model_turn_finished(
+        &self,
+        _ctx: &HookContext,
+        event: ModelTurnFinished<'_>,
+    ) -> ModelTurnAction {
+        if let Ok(mut watch) = self.0.lock() {
+            watch.observe(event.finish_reason, event.max_tokens, event.usage);
+        }
+        ModelTurnAction::Continue
+    }
+}
+
 impl Evaluator for LlmJudge {
     fn name(&self) -> &str {
         "llm_judge"
@@ -92,12 +133,63 @@ impl Evaluator for LlmJudge {
         if let Some(failed) = target_failed(self.name(), trial) {
             return ready(Ok(failed));
         }
-        let verdict = self.agent.prompt_typed::<Verdict>(self.prompt(case, trial));
+        let watch = Arc::new(Mutex::new(Watch::default()));
+        let run = self
+            .agent
+            .prompt_typed::<Verdict>(self.prompt(case, trial))
+            .add_hook(Observe(Arc::clone(&watch)));
         Box::pin(async move {
-            let verdict = verdict.await?.output;
-            let score = Score::new(self.name(), verdict.score, false);
-            let passed = score.value >= self.threshold;
-            Ok(Score { passed, ..score }.with_explanation(verdict.reasoning))
+            match run.await {
+                Ok(response) => {
+                    let verdict = response.output;
+                    let score = Score::new(self.name(), verdict.score, false);
+                    let passed = score.value >= self.threshold;
+                    Ok(Score { passed, ..score }
+                        .with_explanation(verdict.reasoning)
+                        .with_usage(response.usage))
+                }
+                Err(error) => {
+                    // A failed judgment is a failed score labelled error, as an
+                    // experiment records an evaluator error, but it keeps the
+                    // tokens the judge spent.
+                    let watch = watch.lock().map(|watch| watch.clone()).unwrap_or_default();
+                    let message = match watch.cut_off {
+                        Some(max_tokens) => format!(
+                            "the judge returned no verdict: the reply was truncated at max_tokens{}",
+                            max_tokens.map(|n| format!(" ({n})")).unwrap_or_default()
+                        ),
+                        None => format!("the judge returned no verdict: {error}"),
+                    };
+                    Ok(Score::fail(self.name(), message)
+                        .with_label("error")
+                        .with_usage(watch.usage))
+                }
+            }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cut_off_is_the_last_turns_and_the_usage_adds_up() {
+        let usage = |n| {
+            Usage::new()
+                .input_tokens(n)
+                .output_tokens(n)
+                .total_tokens(2 * n)
+        };
+        let mut watch = Watch::default();
+        watch.observe(Some(&FinishReason::Length), Some(64), usage(1));
+        assert_eq!(watch.cut_off, Some(Some(64)));
+
+        watch.observe(Some(&FinishReason::Stop), Some(64), usage(2));
+        assert_eq!(watch.cut_off, None, "a later stop clears an earlier length");
+
+        watch.observe(Some(&FinishReason::Length), None, usage(3));
+        assert_eq!(watch.cut_off, Some(None), "a length without a cap");
+        assert_eq!(watch.usage.total_tokens, Some(12));
     }
 }

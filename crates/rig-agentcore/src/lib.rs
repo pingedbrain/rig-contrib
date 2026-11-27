@@ -48,6 +48,7 @@ use futures::StreamExt;
 use rig_agent::Agent;
 use rig_agent::agent::MultiTurnStreamItem;
 use rig_core::streaming::{Item, StreamEvent};
+use rig_memory::recent::{Recent, TokenBudget};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -65,6 +66,9 @@ pub const DEFAULT_PORT: u16 = 8080;
 /// its own microVM, so one process usually sees one; this bounds the memory
 /// when the app runs elsewhere.
 pub const DEFAULT_MAX_SESSIONS: usize = 1000;
+
+/// How many tokens of history a session keeps by default.
+pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
 
 /// Why the app stopped serving.
 #[derive(Debug, thiserror::Error)]
@@ -102,7 +106,10 @@ impl AgentCoreApp {
         Self {
             inner: Arc::new(Inner {
                 agent,
-                sessions: Sessions::new(DEFAULT_MAX_SESSIONS),
+                sessions: Sessions::new(
+                    DEFAULT_MAX_SESSIONS,
+                    Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
+                ),
                 record_content: false,
             }),
         }
@@ -111,7 +118,23 @@ impl AgentCoreApp {
     /// Keep at most `max` sessions' conversations, forgetting the oldest.
     #[must_use]
     pub fn max_sessions(self, max: usize) -> Self {
-        self.rebuild(|inner| inner.sessions = Sessions::new(max))
+        self.rebuild(|inner| {
+            inner.sessions = Sessions::new(max, inner.sessions.window());
+        })
+    }
+
+    /// Which newest messages of a session each invocation sends the model,
+    /// such as `rig_memory::recent::TokenBudget::new(8_000)` or
+    /// `LastMessages(20)`. Messages the window no longer keeps are forgotten,
+    /// not only left out of the request. Defaults to
+    /// [`DEFAULT_HISTORY_TOKENS`] tokens. A tool result is never sent without
+    /// its call. An empty window (`TokenBudget::new(0)`, `LastMessages(0)`)
+    /// keeps nothing, so every invocation starts without history.
+    #[must_use]
+    pub fn history_window(self, window: impl Recent + 'static) -> Self {
+        self.rebuild(|inner| {
+            inner.sessions = Sessions::new(inner.sessions.capacity(), Arc::new(window));
+        })
     }
 
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
@@ -127,7 +150,7 @@ impl AgentCoreApp {
             Ok(inner) => inner,
             Err(shared) => Inner {
                 agent: shared.agent.clone(),
-                sessions: Sessions::new(shared.sessions.capacity()),
+                sessions: Sessions::new(shared.sessions.capacity(), shared.sessions.window()),
                 record_content: shared.record_content,
             },
         };

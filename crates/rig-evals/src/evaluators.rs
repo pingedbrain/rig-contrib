@@ -154,6 +154,7 @@ impl Evaluator for Matches {
 #[derive(Debug, Clone, Default)]
 pub struct Equals {
     ignore_case: bool,
+    skip_without_reference: bool,
 }
 
 /// Passes when the answer, trimmed, equals the case's `expected`, trimmed.
@@ -167,6 +168,15 @@ impl Equals {
     #[must_use]
     pub fn ignore_case(mut self) -> Self {
         self.ignore_case = true;
+        self
+    }
+
+    /// Score a case without `expected` as not applicable (N/A) instead of
+    /// an error: for datasets that mix cases with and without an expected
+    /// answer.
+    #[must_use]
+    pub fn not_applicable_without_reference(mut self) -> Self {
+        self.skip_without_reference = true;
         self
     }
 }
@@ -185,6 +195,12 @@ impl Evaluator for Equals {
             return ready(Ok(failed));
         }
         let Some(expected) = &case.expected else {
+            if self.skip_without_reference {
+                return ready(Ok(Score::not_applicable(
+                    self.name(),
+                    "the case has no expected answer",
+                )));
+            }
             return ready(Err(EvalError::MissingReference {
                 case: case.id.clone(),
                 field: "expected",
@@ -279,13 +295,31 @@ pub enum TrajectoryMode {
 
 /// See [`trajectory`].
 #[derive(Debug, Clone)]
-pub struct Trajectory(TrajectoryMode);
+pub struct Trajectory {
+    mode: TrajectoryMode,
+    skip_without_reference: bool,
+}
 
 /// Passes when the tool calls match the case's `trajectory` in `mode`. The
 /// value is the share of expected calls matched. A case without a
-/// trajectory is an [`EvalError::MissingReference`].
+/// trajectory is an [`EvalError::MissingReference`], unless
+/// [`not_applicable_without_reference`](Trajectory::not_applicable_without_reference)
+/// is set, when it is not applicable (N/A).
 pub fn trajectory(mode: TrajectoryMode) -> Trajectory {
-    Trajectory(mode)
+    Trajectory {
+        mode,
+        skip_without_reference: false,
+    }
+}
+
+impl Trajectory {
+    /// Score a case without a `trajectory` as not applicable (N/A) instead
+    /// of an error: for datasets that mix cases with and without one.
+    #[must_use]
+    pub fn not_applicable_without_reference(mut self) -> Self {
+        self.skip_without_reference = true;
+        self
+    }
 }
 
 /// Whether `actual` is a call `expected` describes.
@@ -352,12 +386,18 @@ impl Evaluator for Trajectory {
             return ready(Ok(failed));
         }
         let Some(expected) = &case.trajectory else {
+            if self.skip_without_reference {
+                return ready(Ok(Score::not_applicable(
+                    self.name(),
+                    "the case has no trajectory",
+                )));
+            }
             return ready(Err(EvalError::MissingReference {
                 case: case.id.clone(),
                 field: "trajectory",
             }));
         };
-        let (found, total) = matched(self.0, expected, &trial.tool_calls);
+        let (found, total) = matched(self.mode, expected, &trial.tool_calls);
         let passed = found == total;
         let score = Score::new(self.name(), ratio(found, total), passed);
         if passed {
@@ -371,7 +411,7 @@ impl Evaluator for Trajectory {
             .collect();
         ready(Ok(score.with_explanation(format!(
             "expected {want:?} ({:?}), got {got:?}",
-            self.0
+            self.mode
         ))))
     }
 }

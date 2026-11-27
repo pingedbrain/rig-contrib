@@ -21,7 +21,11 @@ rig_a2a::axum::serve(listener, app).await?;
 
 // Call
 let remote = rig_a2a::RemoteAgent::connect("http://127.0.0.1:3000").await?;
-let agent = AgentBuilder::new(model).dynamic_tool(remote.into_tool()?).build();
+// Rig's default is one turn, so the first tool call would fail: allow the call and the answer.
+let agent = AgentBuilder::new(model)
+    .dynamic_tool(remote.into_tool()?)
+    .default_max_turns(4)
+    .build();
 ```
 
 Targets Rig 0.47. Native only (no wasm).
