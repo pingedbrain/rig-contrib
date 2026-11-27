@@ -31,6 +31,10 @@
 //! A real deployment builds this app as an ARM64 container image, pushes it
 //! to Amazon ECR and runs it on AgentCore Runtime, which then sends the same
 //! requests. This example creates no AWS resources.
+//!
+//! Traces: set `OTEL_EXPORTER_OTLP_ENDPOINT` (for example `http://127.0.0.1:4318`)
+//! to export spans over OTLP, such as to the Jaeger container in rig-otel's
+//! example. Unset, no telemetry is set up, so nothing is exported.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,6 +45,7 @@ use rig_core::completion::CompletionRequest;
 use rig_core::driver::{Exchange, Model, Opening, Transport};
 use rig_core::test_utils::{MockCompletionModel, MockFrame, MockScript, MockStreamEvent, MockTurn};
 use rig_core::wire::Mode;
+use rig_otel::Telemetry;
 
 /// Numbers the scripted replies. Rig's mock takes its turns up front, so each
 /// request gets a fresh one-turn mock, which keeps the script endless.
@@ -78,8 +83,18 @@ fn scripted_model() -> Model<MockScript, Scripted> {
 
 const PREAMBLE: &str = "You are a concise, friendly assistant.";
 
+/// OTLP telemetry when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. The guard flushes
+/// on drop, so it is kept until `main` returns.
+fn telemetry() -> anyhow::Result<Option<Telemetry>> {
+    if std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_none() {
+        return Ok(None);
+    }
+    Ok(Some(rig_otel::init()?))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let _telemetry = telemetry()?;
     let openrouter = std::env::var("OPENROUTER_MODEL").ok();
     let key = std::env::var("OPENROUTER_API_KEY").ok();
 

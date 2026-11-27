@@ -26,6 +26,8 @@ async fn support_bot(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::erro
 }
 ```
 
+A provider rate limit (429) fails the calls it hits: a target error sets the trial's `error`, and a failed judge call is a score labelled `error`. If every trial errors, lower `concurrency` or run again later. This crate adds no retries of its own.
+
 ## Cases
 
 A dataset is a `.jsonl` file (one case per line) or a `.json` array; `Dataset::load` reads

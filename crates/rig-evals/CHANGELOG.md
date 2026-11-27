@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Examples: `evals` prints a one-line hint when every trial errored, which a provider rate limit (429) causes, and the README says to lower `concurrency` or run again later.
+
 ## 0.47.4 (2026-11-27)
 
 - Privacy: the OpenTelemetry event `gen_ai.evaluation.explanation` is no longer recorded by default. A score's explanation is the judge's text, which can quote the agent's answer or the prompt. `Experiment::record_content(true)` records it again. The report, JSON, JUnit and Markdown outputs keep the explanation as before. Upgrading: an existing trace pipeline that reads this attribute needs `.record_content(true)`.

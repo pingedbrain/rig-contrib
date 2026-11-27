@@ -27,8 +27,11 @@
 //! mode the model decides what each agent says, so only the scripted run
 //! checks the join. A live model may also keep handing off instead of
 //! answering, so a live run can stop at `max_handoffs` with an error.
+//! A failed run prints only the failure's kind and exits 1: a Rig error's text
+//! can carry provider output, so it is not printed.
 
 use std::error::Error;
+use std::process::ExitCode;
 
 use futures::StreamExt;
 use rig_agent::{Agent, AgentBuilder};
@@ -38,7 +41,7 @@ use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAI;
 use rig_core::providers::{opencode, openrouter};
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
-use rig_multiagent::{Graph, HANDOFF_TOOL, Swarm, SwarmEvent};
+use rig_multiagent::{Graph, GraphFailure, HANDOFF_TOOL, Swarm, SwarmEvent, SwarmFailure};
 use serde_json::json;
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -201,6 +204,30 @@ fn handoff_event(to: &str, message: &str) -> MockStreamEvent {
     )
 }
 
+/// The short name of a swarm failure, the only part of it that is printed.
+fn swarm_kind(reason: &SwarmFailure) -> &'static str {
+    match reason {
+        SwarmFailure::Agent { .. } => "agent_failed",
+        SwarmFailure::Timeout { .. } => "timeout",
+        SwarmFailure::MaxHandoffs { .. } => "max_handoffs",
+        SwarmFailure::Repetitive { .. } => "repetitive_handoffs",
+        SwarmFailure::Checkpoint { .. } => "checkpoint",
+        _ => "other",
+    }
+}
+
+/// The short name of a graph failure, the only part of it that is printed.
+fn graph_kind(failure: &GraphFailure) -> &'static str {
+    match failure {
+        GraphFailure::Node { .. } => "node_failed",
+        GraphFailure::NodeTimeout { .. } => "node_timeout",
+        GraphFailure::Timeout => "timeout",
+        GraphFailure::MaxNodeExecutions { .. } => "max_node_executions",
+        GraphFailure::Checkpoint { .. } => "checkpoint",
+        _ => "other",
+    }
+}
+
 fn check(ok: bool, what: &str) -> Result {
     if ok {
         Ok(())
@@ -246,8 +273,9 @@ async fn swarm_run(backend: &Backend) -> Result {
                     handoff.from, handoff.to, handoff.message
                 );
             }
-            println!("handoffs: {}, failed: {error}", error.handoffs.len());
-            return Err(error.into());
+            let kind = swarm_kind(&error.reason);
+            println!("handoffs: {}, failed: {kind}", error.handoffs.len());
+            return Err(format!("swarm run failed: {kind}").into());
         }
     };
     for handoff in &run.handoffs {
@@ -300,7 +328,7 @@ async fn swarm_stream(backend: &Backend) -> Result {
                     answered = true;
                     println!("\nanswer by {}: {}", run.agent, run.answer);
                 }
-                Err(error) => println!("\nfailed: {error}"),
+                Err(error) => println!("\nfailed: {}", swarm_kind(&error.reason)),
             },
             _ => {}
         }
@@ -350,7 +378,13 @@ async fn graph_join(backend: &Backend) -> Result {
         .edge("risks", "report")
         .build()?;
 
-    let run = review.run("Review src/tools.rs").await?;
+    let run = match review.run("Review src/tools.rs").await {
+        Ok(run) => run,
+        Err(error) => {
+            let kind = error.failures.first().map_or("none", graph_kind);
+            return Err(format!("graph run failed: {kind}").into());
+        }
+    };
     println!("{}", run.answer());
 
     // The report got both branches' outputs as its input: the join.
@@ -369,11 +403,21 @@ async fn graph_join(backend: &Backend) -> Result {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result {
+async fn run() -> Result {
     let backend = Backend::from_env()?;
     swarm_run(&backend).await?;
     swarm_stream(&backend).await?;
     graph_join(&backend).await?;
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

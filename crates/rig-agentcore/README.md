@@ -80,7 +80,9 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
-  is what AgentCore Observability and AgentCore Evaluations read.
+  is what AgentCore Observability and AgentCore Evaluations read. To see the spans of the
+  `serve` example on your machine, set `OTEL_EXPORTER_OTLP_ENDPOINT` (for example
+  `http://127.0.0.1:4318`) and run it against a collector.
 - **Limits:** all opt-in. `max_concurrent_tasks` caps invocations running at once (past
   the cap, 429 before the agent runs; no cap by default, since AgentCore Runtime gives each
   session its own microVM). `max_run_duration` stops an invocation, summarizing included,

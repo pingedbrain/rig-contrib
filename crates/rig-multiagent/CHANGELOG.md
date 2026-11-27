@@ -2,6 +2,10 @@
 
 Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- Examples: `swarm_graph` prints only the failure kind (for example `agent_failed`) and exits 1 when a run fails. It no longer prints the Rig error text, which can carry provider output.
+
 ## 0.47.4 (2026-11-27)
 
 - Logs no longer print checkpoint or node error text. A failed node or checkpoint write logs a short `kind` only, because the text can carry provider output or prompt content. No public API or behavior changed.
