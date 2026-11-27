@@ -13,7 +13,10 @@
 //!   `text/event-stream`, and is one JSON object otherwise;
 //! - each invocation runs in a span that continues the caller's trace and
 //!   carries the session as `session.id` (through [`rig_otel`]), which is what
-//!   AgentCore Observability and Evaluations group a session's traces by.
+//!   AgentCore Observability and Evaluations group a session's traces by;
+//! - `/ping` answers `HealthyBusy` while an invocation or background work from
+//!   [`AgentCoreApp::spawn_task`] is open, so AgentCore Runtime keeps the
+//!   session running until that work ends.
 //!
 //! ```no_run
 //! # async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
@@ -33,9 +36,11 @@
     )
 )]
 
+mod busy;
 mod history;
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,6 +65,7 @@ use tokio::sync::mpsc;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::Instrument;
 
+use crate::busy::Busy;
 use crate::history::{
     HistoryError, HistoryStore, InMemory, Persistent, Retained, Summarizing, is_summary, local_id,
     summarize,
@@ -83,6 +89,7 @@ pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
 /// extractor already applied. A larger body gets 413.
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 
+pub use busy::BusyGuard;
 /// The session stores and history windows conversations are kept with.
 pub use rig_memory;
 
@@ -120,6 +127,7 @@ struct Inner {
     slots: Option<Arc<Semaphore>>,
     max_run: Option<Duration>,
     max_request_bytes: usize,
+    busy: Arc<Busy>,
 }
 
 impl AgentCoreApp {
@@ -135,6 +143,7 @@ impl AgentCoreApp {
                 slots: None,
                 max_run: None,
                 max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+                busy: Busy::new(),
             }),
         }
     }
@@ -276,6 +285,39 @@ impl AgentCoreApp {
         self.rebuild(|inner| inner.max_request_bytes = bytes)
     }
 
+    /// Mark background work as open until the returned guard drops. While any
+    /// guard is alive, `/ping` answers `HealthyBusy`, so AgentCore Runtime keeps
+    /// the session running; once they are all dropped it answers `Healthy`
+    /// again. Use it for work that outlives an invocation, such as a task the
+    /// app starts on its own.
+    pub fn track_task(&self) -> BusyGuard {
+        Busy::open(&self.inner.busy)
+    }
+
+    /// Run `future` on the Tokio runtime as background work. `/ping` answers
+    /// `HealthyBusy` until it finishes, or until its task is aborted. Dropping
+    /// the returned handle does not stop the task. Call it on a running Tokio
+    /// runtime, as for [`tokio::spawn`].
+    ///
+    /// ```no_run
+    /// # async fn run(app: &rig_agentcore::AgentCoreApp) {
+    /// app.spawn_task(async {
+    ///     // Work that outlives the invocation that started it.
+    /// });
+    /// # }
+    /// ```
+    pub fn spawn_task<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let guard = self.track_task();
+        tokio::spawn(async move {
+            let _guard = guard;
+            future.await
+        })
+    }
+
     fn rebuild(self, change: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = Arc::try_unwrap(self.inner).unwrap_or_else(|shared| (*shared).clone());
         change(&mut inner);
@@ -342,8 +384,14 @@ struct Invocation {
     prompt: String,
 }
 
-async fn ping() -> Json<serde_json::Value> {
-    Json(json!({"status": "Healthy"}))
+/// `Healthy`, or `HealthyBusy` while work is open, with the Unix time (in
+/// seconds) the status last changed. The time moves only on a change, as
+/// AgentCore's contract asks: a time that advanced on every ping would keep the
+/// idle timeout from firing.
+async fn ping(State(app): State<AgentCoreApp>) -> Json<serde_json::Value> {
+    let (busy, since) = app.inner.busy.status();
+    let status = if busy { "HealthyBusy" } else { "Healthy" };
+    Json(json!({"status": status, "time_of_last_update": since}))
 }
 
 async fn invoke(
@@ -383,6 +431,9 @@ async fn invoke(
             }
         },
     };
+    // Open for the whole run, however it ends. Opened after the slot, so a
+    // refused invocation does not flip the status.
+    let busy = app.track_task();
     let session = headers
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -419,9 +470,9 @@ async fn invoke(
         .and_then(|value| value.to_str().ok())
         .is_some_and(|accept| accept.contains("text/event-stream"));
     if streams {
-        stream(app, session, invocation.prompt, span, slot)
+        stream(app, session, invocation.prompt, span, slot, busy)
     } else {
-        whole(app, session, invocation.prompt, slot)
+        whole(app, session, invocation.prompt, slot, busy)
             .instrument(span)
             .await
     }
@@ -462,6 +513,7 @@ async fn whole(
     session: String,
     prompt: String,
     _slot: Option<OwnedSemaphorePermit>,
+    _busy: BusyGuard,
 ) -> Response {
     let inner = &app.inner;
     let deadline = deadline_of(inner.max_run);
@@ -565,11 +617,13 @@ fn stream(
     prompt: String,
     span: tracing::Span,
     slot: Option<OwnedSemaphorePermit>,
+    busy: BusyGuard,
 ) -> Response {
     let (sender, receiver) = mpsc::unbounded_channel::<serde_json::Value>();
     tokio::spawn(
         async move {
             let _slot = slot;
+            let _busy = busy;
             let inner = &app.inner;
             let deadline = deadline_of(inner.max_run);
             let history = match within(deadline, history_of(inner, &session)).await {

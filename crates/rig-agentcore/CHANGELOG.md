@@ -4,6 +4,12 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- `AgentCoreApp::spawn_task(future)` runs background work on Tokio, and `AgentCoreApp::track_task()`
+  returns a `BusyGuard` for work the app runs itself. While either is open, `/ping` answers
+  `HealthyBusy`, so AgentCore Runtime keeps the session running. The status returns to `Healthy`
+  when the work ends, including when its task is aborted.
+- `/ping` adds `time_of_last_update` (Unix seconds), which moves only when the status changes, as
+  AgentCore's HTTP contract asks. An idle app still answers `Healthy` with the same `status` field.
 - README snippets are compile-checked as doctests, so the examples cannot rot.
 - `AgentCoreApp::summarize_history(summarizer, keep_recent, trigger_messages)`: opt-in. Past
   `trigger_messages`, a session's older messages become one summary, its first message: a user
