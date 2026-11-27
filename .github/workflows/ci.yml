@@ -108,3 +108,21 @@ jobs:
       - run: interop/run.sh
         env:
           MCP_PY: .venv-mcp/bin/python
+
+  examples:
+    name: keyless examples (run once, no model calls)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install # the one rust-toolchain.toml names
+      - uses: Swatinem/rust-cache@v2
+      - run: ci/examples.sh
+
+  package:
+    name: cargo package (no verify)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo package --workspace --no-verify
