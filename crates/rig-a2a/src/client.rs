@@ -42,6 +42,8 @@ const MAX_TOOL_NAME: usize = 64;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 /// Largest text file a tool result inlines.
 const MAX_INLINE_TEXT: usize = 20_000;
+/// Largest agent card read from a remote agent.
+const MAX_CARD_BYTES: usize = 1024 * 1024;
 
 /// Why a remote agent could not be reached or did not answer.
 #[derive(Debug, thiserror::Error)]
@@ -322,16 +324,15 @@ impl RemoteAgentBuilder {
             self.base_url.trim_end_matches('/'),
             a2a_server::WELL_KNOWN_AGENT_CARD_PATH
         );
-        let card: Value = tokio::time::timeout(self.timeout, async {
-            http.get(&card_url)
-                .send()
-                .await?
-                .error_for_status()?
-                .json()
-                .await
+        let body = tokio::time::timeout(self.timeout, async {
+            let response = http.get(&card_url).send().await?.error_for_status()?;
+            read_capped(response, MAX_CARD_BYTES).await
         })
         .await
-        .map_err(|_| RemoteError::Timeout(self.timeout))??;
+        .map_err(|_| RemoteError::Timeout(self.timeout))??
+        .ok_or_else(|| RemoteError::Card(format!("larger than {MAX_CARD_BYTES} bytes")))?;
+        let card: Value = serde_json::from_slice(&body)
+            .map_err(|e| RemoteError::Card(format!("not JSON: {e}")))?;
 
         if card.get("supportedInterfaces").is_some() {
             let card: AgentCard = serde_json::from_value(card)
@@ -647,6 +648,23 @@ fn describe_file(file: &RemoteFile, images: &mut Vec<ToolResultContent>) -> Valu
         }
     }
     Value::Object(described)
+}
+
+/// The body of a response, read chunk by chunk; `None` once it passes
+/// `limit` bytes, so a long body is never held whole.
+pub(crate) async fn read_capped(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<Option<Vec<u8>>, reqwest::Error> {
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        body.extend_from_slice(&chunk?);
+        if body.len() > limit {
+            return Ok(None);
+        }
+    }
+    Ok(Some(body))
 }
 
 /// A v0.3 card read as a v1.0 one, for [`RemoteAgent::card`]: one JSON-RPC

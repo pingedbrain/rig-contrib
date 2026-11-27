@@ -103,9 +103,10 @@ async fn each_score_is_a_gen_ai_evaluation_event_on_the_trial_span() {
         value(&failed.attributes, "gen_ai.evaluation.score.label"),
         Some("fail".into())
     );
+    // The explanation is judge text: not recorded unless asked for.
     assert_eq!(
         value(&failed.attributes, "gen_ai.evaluation.explanation"),
-        Some("missing [\"Lyon\"]".into())
+        None
     );
 
     // The agent's run is traced under the trial it was evaluated in.
@@ -116,4 +117,49 @@ async fn each_score_is_a_gen_ai_evaluation_event_on_the_trial_span() {
         .map(|operation| operation.to_string())
         .collect();
     assert!(!operations.is_empty(), "no GenAI span under the trial");
+}
+
+#[tokio::test]
+async fn the_explanation_is_recorded_only_with_record_content() {
+    let run = |record: bool| {
+        capture(move || async move {
+            let agent =
+                AgentBuilder::new(MockCompletionModel::from_turns([MockTurn::text("Paris")]))
+                    .build();
+            Experiment::new("geo")
+                .dataset(vec![Case::new("capital", "Capital of France?")])
+                .target(agent)
+                .evaluator(evaluators::contains("Lyon").named("lyon"))
+                .record_content(record)
+                .run()
+                .await
+                .expect("runs");
+        })
+    };
+
+    let off = run(false).await;
+    let trial = off
+        .iter()
+        .find(|span| span.name == "eval.trial")
+        .expect("an eval.trial span");
+    assert_eq!(
+        value(
+            &result(trial, "lyon").attributes,
+            "gen_ai.evaluation.explanation"
+        ),
+        None
+    );
+
+    let on = run(true).await;
+    let trial = on
+        .iter()
+        .find(|span| span.name == "eval.trial")
+        .expect("an eval.trial span");
+    assert_eq!(
+        value(
+            &result(trial, "lyon").attributes,
+            "gen_ai.evaluation.explanation"
+        ),
+        Some("missing [\"Lyon\"]".into())
+    );
 }
