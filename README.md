@@ -51,6 +51,34 @@ flowchart LR
 `rig-mcp-server` (always on in `rig-agentcore`), a call from one agent to another
 continues the caller's trace and session.
 
+## Settings across crates
+
+Each cell is the builder method on that crate, with its default in brackets. `—` means the crate has no such setting. Turn budgets and content recording for the agent itself come from Rig's `AgentBuilder` (`default_max_turns`, `record_content_telemetry`).
+
+| Concept | rig-a2a | rig-mcp-server | rig-multiagent | rig-otel | rig-evals | rig-agentcore |
+|---|---|---|---|---|---|---|
+| Run timeout | `max_run_duration` (600 s) | `max_run_duration` (600 s) | `execution_timeout` (15 min) on `Swarm` and `Graph`; per step `agent_timeout` (`Swarm`) or `node_timeout` (`Graph`), 5 min | — | `trial_timeout` (off) | `max_run_duration` (no limit) |
+| Concurrency cap | `max_concurrent_tasks` (32) | `max_concurrent_calls` (32) | — | — | `concurrency` (4 trials, not requests) | `max_concurrent_tasks` (no limit) |
+| History window | `history_window` (32,000 tokens) | `history_window` (32,000 tokens) | — | — | — | `history_window` (32,000 tokens) |
+| Max sessions | `max_contexts` (1,000) | `max_sessions` (1,000) | — | — | — | `max_sessions` (1,000) |
+| Request size limit | `max_request_bytes` (2 MiB) | — | — | — | — | `max_request_bytes` (2 MiB) |
+| Content recording | — | — | — | — | — | `record_content` (false) |
+| Bearer token | `bearer_token` on `A2aServer` (none); `bearer_token` on `RemoteAgentBuilder` (none) | `bearer_token` (none, HTTP only) | — | — | — | — |
+| Turn budget | — | — | `max_turns_per_agent` (8) | — | — | — |
+
+Session ids are spelled differently in each crate, so they are not a builder setting:
+
+| Crate | Session id |
+|---|---|
+| rig-a2a | `contextId` in the A2A message |
+| rig-mcp-server | `session_id` argument of agent tools |
+| rig-multiagent | — |
+| rig-otel | `session.id` span attribute, set with `set_session` |
+| rig-evals | `session_id` on `TargetOutput::with_session_id`; AgentCore queries use `session.id` |
+| rig-agentcore | `x-amzn-bedrock-agentcore-runtime-session-id` header (`SESSION_HEADER`) |
+
+Doc aliases make the same concept findable under the other crate's name: `max_sessions` for `max_contexts` in rig-a2a, `max_concurrent_tasks` for `max_concurrent_calls` in rig-mcp-server, and `node_timeout` and `agent_timeout` on the two rig-multiagent builders.
+
 ## Verified
 
 - **Interoperability:** CI runs `rig-a2a` against Strands Agents and the official A2A
