@@ -385,7 +385,7 @@ fn find<'a>(points: &'a [Point], name: &str, attrs: &[(&str, &str)]) -> Vec<&'a 
 }
 
 #[tokio::test]
-async fn tool_calls_and_model_turns_become_strands_metrics() {
+async fn tool_calls_and_model_requests_become_rig_metrics() {
     let captured = capture(|| async {
         let model = MockCompletionModel::from_turns([
             MockTurn::tool_call("call-1", "add", json!({"a": 2, "b": 40}))
@@ -407,7 +407,7 @@ async fn tool_calls_and_model_turns_become_strands_metrics() {
     .await;
     let points = points(&captured);
     // The new metrics carry only the agent, tool and error-type attributes.
-    for p in points.iter().filter(|p| p.name.starts_with("strands.")) {
+    for p in points.iter().filter(|p| p.name.starts_with("rig.")) {
         for (key, _) in &p.attributes {
             assert!(
                 matches!(
@@ -431,20 +431,20 @@ async fn tool_calls_and_model_turns_become_strands_metrics() {
     ];
 
     // Tool calls: one per execute_tool span, per tool.
-    let calls = find(&points, "strands.tool.call_count", &add);
+    let calls = find(&points, "rig.tool.call_count", &add);
     assert_eq!(calls.len(), 1, "{points:#?}");
     assert_eq!((calls[0].unit.as_str(), calls[0].value), ("{call}", 1));
-    let calls = find(&points, "strands.tool.call_count", &fail);
+    let calls = find(&points, "rig.tool.call_count", &fail);
     assert_eq!((calls[0].unit.as_str(), calls[0].value), ("{call}", 1));
 
     // Successes and errors: the successful call only succeeds, the failed one only errors.
-    let successes = find(&points, "strands.tool.success_count", &add);
+    let successes = find(&points, "rig.tool.success_count", &add);
     assert_eq!(
         (successes[0].unit.as_str(), successes[0].value),
         ("{call}", 1)
     );
-    assert!(find(&points, "strands.tool.success_count", &fail).is_empty());
-    let errors = find(&points, "strands.tool.error_count", &fail);
+    assert!(find(&points, "rig.tool.success_count", &fail).is_empty());
+    let errors = find(&points, "rig.tool.error_count", &fail);
     assert_eq!(errors.len(), 1, "{points:#?}");
     assert_eq!((errors[0].unit.as_str(), errors[0].value), ("{call}", 1));
     assert!(
@@ -455,12 +455,12 @@ async fn tool_calls_and_model_turns_become_strands_metrics() {
         "{:?}",
         errors[0]
     );
-    assert!(find(&points, "strands.tool.error_count", &add).is_empty());
+    assert!(find(&points, "rig.tool.error_count", &add).is_empty());
 
     // Tool duration: one recording per call; the failed one carries error.type.
-    let durations = find(&points, "strands.tool.duration", &add);
+    let durations = find(&points, "rig.tool.duration", &add);
     assert_eq!((durations[0].unit.as_str(), durations[0].value), ("s", 1));
-    let durations = find(&points, "strands.tool.duration", &fail);
+    let durations = find(&points, "rig.tool.duration", &fail);
     assert_eq!((durations[0].unit.as_str(), durations[0].value), ("s", 1));
     assert!(
         durations[0]
@@ -469,13 +469,19 @@ async fn tool_calls_and_model_turns_become_strands_metrics() {
             .any(|(k, _)| k == "error.type")
     );
 
-    // Event-loop cycles: one per model turn, three turns here.
-    let cycles = find(&points, "strands.event_loop.cycle_count", &agent);
-    assert_eq!(cycles.len(), 1, "{points:#?}");
-    assert_eq!((cycles[0].unit.as_str(), cycles[0].value), ("{cycle}", 3));
-    let cycle_durations = find(&points, "strands.event_loop.cycle_duration", &agent);
+    // Model requests: one per chat span, three here.
+    let requests = find(&points, "rig.model.request_count", &agent);
+    assert_eq!(requests.len(), 1, "{points:#?}");
     assert_eq!(
-        (cycle_durations[0].unit.as_str(), cycle_durations[0].value),
+        (requests[0].unit.as_str(), requests[0].value),
+        ("{request}", 3)
+    );
+    let request_durations = find(&points, "rig.model.request_duration", &agent);
+    assert_eq!(
+        (
+            request_durations[0].unit.as_str(),
+            request_durations[0].value
+        ),
         ("s", 3)
     );
 

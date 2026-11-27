@@ -1,6 +1,6 @@
 //! GenAI metrics read from Rig's spans: how long each model and tool call
-//! took, the tokens it used, and the tool calls and model turns (Strands'
-//! event-loop cycles) behind an agent run.
+//! took, the tokens it used, and the tool calls and model requests behind an
+//! agent run.
 
 use std::time::Instant;
 
@@ -30,9 +30,11 @@ const TOKEN_BUCKETS: [f64; 14] = [
 /// `gen_ai.operation.name` (Rig's `chat`, `execute_tool`, `invoke_agent`)
 /// and `gen_ai.client.token.usage` for the ones that report tokens.
 ///
-/// Also derives Strands Agents' tool and event-loop metrics from the same
-/// spans: `execute_tool` spans give the tool counts, durations and errors,
-/// and `chat` spans (one per model turn) give the event-loop cycles.
+/// Also derives tool and model-request metrics from the same spans:
+/// `execute_tool` spans give the tool counts, durations and errors, and
+/// `chat` spans give the model requests. A `chat` span is one model request
+/// attempt, not one completed turn: a turn the hooks reject and a retried
+/// request each get their own span, and so are counted.
 pub(crate) struct GenAiMetrics {
     duration: Histogram<f64>,
     tokens: Histogram<u64>,
@@ -40,8 +42,8 @@ pub(crate) struct GenAiMetrics {
     tool_successes: Counter<u64>,
     tool_errors: Counter<u64>,
     tool_duration: Histogram<f64>,
-    cycles: Counter<u64>,
-    cycle_duration: Histogram<f64>,
+    requests: Counter<u64>,
+    request_duration: Histogram<f64>,
 }
 
 impl GenAiMetrics {
@@ -60,35 +62,35 @@ impl GenAiMetrics {
                 .with_boundaries(TOKEN_BUCKETS.to_vec())
                 .build(),
             tool_calls: meter
-                .u64_counter("strands.tool.call_count")
+                .u64_counter("rig.tool.call_count")
                 .with_unit("{call}")
                 .with_description("Tool calls, one per execute_tool span")
                 .build(),
             tool_successes: meter
-                .u64_counter("strands.tool.success_count")
+                .u64_counter("rig.tool.success_count")
                 .with_unit("{call}")
                 .with_description("Tool calls that returned a result")
                 .build(),
             tool_errors: meter
-                .u64_counter("strands.tool.error_count")
+                .u64_counter("rig.tool.error_count")
                 .with_unit("{call}")
                 .with_description("Tool calls that failed")
                 .build(),
             tool_duration: meter
-                .f64_histogram("strands.tool.duration")
+                .f64_histogram("rig.tool.duration")
                 .with_unit("s")
                 .with_description("Tool call duration")
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
-            cycles: meter
-                .u64_counter("strands.event_loop.cycle_count")
-                .with_unit("{cycle}")
-                .with_description("Model turns (event-loop cycles) run by the agent")
+            requests: meter
+                .u64_counter("rig.model.request_count")
+                .with_unit("{request}")
+                .with_description("Model request attempts (chat spans) made by the agent")
                 .build(),
-            cycle_duration: meter
-                .f64_histogram("strands.event_loop.cycle_duration")
+            request_duration: meter
+                .f64_histogram("rig.model.request_duration")
                 .with_unit("s")
-                .with_description("Duration of each model turn (event-loop cycle)")
+                .with_description("Duration of each model request attempt (chat span)")
                 .with_boundaries(DURATION_BUCKETS.to_vec())
                 .build(),
         }
@@ -231,7 +233,7 @@ where
             }
         }
 
-        // Strands' attributes: the agent, the tool, and the error type on a
+        // Attributes: the agent, the tool, and the error type on a
         // failure. Only these; the rest of the span stays out of the metrics.
         let mut labels = Vec::new();
         if let Some(agent) = operation.agent.clone().or_else(|| enclosing_agent(&span)) {
@@ -261,10 +263,11 @@ where
                 }
                 self.tool_duration.record(elapsed, &duration_labels);
             }
-            // One `chat` span per model turn: one Strands event-loop cycle.
+            // One `chat` span per model request attempt (retries and hook-rejected
+            // turns included).
             "chat" => {
-                self.cycles.add(1, &labels);
-                self.cycle_duration.record(elapsed, &labels);
+                self.requests.add(1, &labels);
+                self.request_duration.record(elapsed, &labels);
             }
             _ => {}
         }

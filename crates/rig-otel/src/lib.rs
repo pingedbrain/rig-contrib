@@ -10,8 +10,8 @@
 //!   Honeycomb, Langfuse, Phoenix, AWS CloudWatch), configured by the standard
 //!   `OTEL_*` variables.
 //! - **Metrics**: `gen_ai.client.operation.duration`,
-//!   `gen_ai.client.token.usage` and Strands Agents' tool and event-loop
-//!   metrics (`strands.tool.*`, `strands.event_loop.*`), read from Rig's spans, so no agent code
+//!   `gen_ai.client.token.usage` and tool and model-request metrics
+//!   (`rig.tool.*`, `rig.model.*`), read from Rig's spans, so no agent code
 //!   changes.
 //! - **Sessions**: [`set_session`] gives a span and everything under it a
 //!   `session.id`, the attribute AWS Bedrock AgentCore groups a conversation's
