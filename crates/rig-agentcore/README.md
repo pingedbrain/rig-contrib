@@ -20,6 +20,10 @@ rig_agentcore::AgentCoreApp::new(agent)
 
 - **Sessions:** the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header names the
   conversation; each session's messages are kept and sent with its next invocation.
+  A session keeps at most 32,000 tokens of history by default (the newest messages,
+  counted as `rig-memory`'s heuristic counts them); set another cap with
+  `.max_history_tokens(n)`. Older messages are forgotten, never splitting a tool call
+  from its result.
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that

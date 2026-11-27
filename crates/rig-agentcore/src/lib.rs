@@ -66,6 +66,10 @@ pub const DEFAULT_PORT: u16 = 8080;
 /// when the app runs elsewhere.
 pub const DEFAULT_MAX_SESSIONS: usize = 1000;
 
+/// How many tokens of a session's history an app keeps by default, counted
+/// as [`rig_memory::HeuristicTokenCounter`] counts them.
+pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
+
 /// Why the app stopped serving.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -102,7 +106,7 @@ impl AgentCoreApp {
         Self {
             inner: Arc::new(Inner {
                 agent,
-                sessions: Sessions::new(DEFAULT_MAX_SESSIONS),
+                sessions: Sessions::new(DEFAULT_MAX_SESSIONS, DEFAULT_HISTORY_TOKENS),
                 record_content: false,
             }),
         }
@@ -111,7 +115,19 @@ impl AgentCoreApp {
     /// Keep at most `max` sessions' conversations, forgetting the oldest.
     #[must_use]
     pub fn max_sessions(self, max: usize) -> Self {
-        self.rebuild(|inner| inner.sessions = Sessions::new(max))
+        self.rebuild(|inner| {
+            inner.sessions = Sessions::new(max, inner.sessions.history_tokens());
+        })
+    }
+
+    /// Keep at most `tokens` tokens of each session's history, forgetting the
+    /// oldest messages first (never splitting a tool call from its result).
+    /// Defaults to [`DEFAULT_HISTORY_TOKENS`].
+    #[must_use]
+    pub fn max_history_tokens(self, tokens: usize) -> Self {
+        self.rebuild(|inner| {
+            inner.sessions = Sessions::new(inner.sessions.capacity(), tokens);
+        })
     }
 
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
@@ -127,7 +143,10 @@ impl AgentCoreApp {
             Ok(inner) => inner,
             Err(shared) => Inner {
                 agent: shared.agent.clone(),
-                sessions: Sessions::new(shared.sessions.capacity()),
+                sessions: Sessions::new(
+                    shared.sessions.capacity(),
+                    shared.sessions.history_tokens(),
+                ),
                 record_content: shared.record_content,
             },
         };
