@@ -51,7 +51,7 @@ const FAITHFULNESS: &str = "\
 Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made, the expected answer and the assertions. Tool outputs are not shown, so do not mark a claim unsupported only because its source is not shown.
 - 1: every factual claim in the answer is supported by the evidence.
 - 0.5: most claims are supported, but one claim is unsupported or only partly supported.
-- 0: the answer states facts, figures, names, dates or quotes the evidence does not contain, or contradicts it.
+- 0: the answer contradicts the evidence, or most of its factual claims are unsupported by it.
 Do not penalize an answer for leaving things out. An empty or refused answer scores 0 unless refusing is correct for the input.";
 
 /// The rubric of [`LlmJudge::goal_success`].
