@@ -25,9 +25,19 @@ pub(crate) struct Deadline {
 }
 
 tokio::task_local! {
-    /// The deadline of the trial whose target run this is. An agent target
-    /// stops each turn at it, so a timed-out run keeps its completed turns.
-    pub(crate) static TRIAL_DEADLINE: Deadline;
+    /// The deadline of the trial whose target run this is, `None` when the
+    /// trial has no timeout. An agent target stops each turn at it, so a
+    /// timed-out run keeps its completed turns. Every target run sets it, so
+    /// a run nested in another never inherits the outer deadline.
+    pub(crate) static TRIAL_DEADLINE: Option<Deadline>;
+}
+
+/// The deadline `limit` from now, or `None` when that overflows the clock
+/// (such as `Duration::MAX`): such a limit is no limit.
+pub(crate) fn deadline_in(limit: Duration) -> Option<Deadline> {
+    tokio::time::Instant::now()
+        .checked_add(limit)
+        .map(|at| Deadline { at, limit })
 }
 
 /// The explanation of a call that outlived `limit`.
@@ -268,7 +278,7 @@ impl Target for Agent {
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
             let multi = !case.turns.is_empty();
-            let deadline = TRIAL_DEADLINE.try_with(|deadline| *deadline).ok();
+            let deadline = TRIAL_DEADLINE.try_with(|deadline| *deadline).ok().flatten();
             // A multi-turn case carries its own history, starting empty, so
             // it does not pick up the agent's memory store; a single-turn
             // case runs as before.

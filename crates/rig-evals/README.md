@@ -129,7 +129,7 @@ threshold, so CI test views show the failures.
 
 `trial_timeout(limit)` gives each target run and each evaluator call at most `limit`. A
 run that takes longer fails its trial with `timed out after <n>s`; the other trials run on.
-It is off unless set.
+It is off unless set. The turns of one multi-turn case share the limit, and a timed-out judge's tokens are not counted in the report. It needs a running tokio runtime.
 
 ```rust
 use std::time::Duration;

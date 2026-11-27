@@ -254,3 +254,84 @@ async fn the_agent_still_runs_normally_under_a_timeout() {
 
     assert!(report.passed());
 }
+
+#[tokio::test]
+async fn a_limit_too_large_for_the_clock_is_no_limit() {
+    let report = Experiment::new("unbounded")
+        .dataset(Dataset::new([Case::new("one", "input")]))
+        .target(target_fn(|_: Case| async move {
+            Ok::<_, TargetError>("ok".to_owned())
+        }))
+        .evaluator(evaluators::contains("ok"))
+        .trial_timeout(Duration::MAX)
+        .run()
+        .await
+        .expect("the experiment runs");
+
+    let trial = &report.trials.first().expect("a trial").trial;
+    assert_eq!(trial.error, None);
+    assert!(report.passed());
+}
+
+#[tokio::test]
+async fn a_nested_untimed_run_does_not_inherit_the_outer_deadline() {
+    /// A tool that takes longer than the outer trial's limit.
+    struct Slow;
+
+    impl Tool for Slow {
+        const NAME: &'static str = "slow";
+        type Error = MockToolError;
+        type Args = Value;
+        type Output = String;
+
+        fn description(&self) -> String {
+            "Takes a while".to_owned()
+        }
+
+        fn parameters(&self) -> Value {
+            json!({"type": "object", "properties": {}})
+        }
+
+        async fn call(
+            &self,
+            _context: &mut ToolContext,
+            _args: Self::Args,
+        ) -> Result<Self::Output, Self::Error> {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            Ok("done".to_owned())
+        }
+    }
+
+    // The outer trial has 100 ms. Its target runs an inner experiment with no
+    // timeout; the inner agent's tool takes 150 ms. The inner run must not be
+    // cut at the outer deadline, so the outer trial is the one that times out.
+    let outer = Experiment::new("outer")
+        .dataset(Dataset::new([Case::new("one", "input")]))
+        .target(target_fn(|_: Case| async move {
+            let model = MockCompletionModel::from_turns([
+                MockTurn::tool_call("call-1", "slow", json!({})),
+                MockTurn::text("answer"),
+            ]);
+            let agent = AgentBuilder::new(model)
+                .tool(Slow)
+                .default_max_turns(3)
+                .build();
+            let inner = Experiment::new("inner")
+                .dataset(Dataset::new([Case::new("inner-case", "go")]))
+                .target(agent)
+                .evaluator(evaluators::no_error())
+                .run()
+                .await
+                .map_err(|error| -> TargetError { error.to_string().into() })?;
+            let answer = inner.trials.first().and_then(|t| t.trial.error.clone());
+            Ok::<_, TargetError>(answer.unwrap_or_else(|| "inner ok".to_owned()))
+        }))
+        .evaluator(evaluators::no_error())
+        .trial_timeout(Duration::from_millis(100))
+        .run()
+        .await
+        .expect("the experiment runs");
+
+    let trial = &outer.trials.first().expect("a trial").trial;
+    assert_eq!(trial.error.as_deref(), Some("timed out after 0.1s"));
+}

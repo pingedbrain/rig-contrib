@@ -7,7 +7,7 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use crate::evaluator::clamp;
-use crate::target::{Deadline, TRIAL_DEADLINE, timeout_message};
+use crate::target::{TRIAL_DEADLINE, deadline_in, timeout_message};
 use crate::{
     Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult,
     TurnFailed,
@@ -107,9 +107,15 @@ impl Experiment {
     /// times out makes a trial with the error `timed out after <n>s`, which
     /// the built-in evaluators fail; an evaluator that times out gives a
     /// failed score labelled `error`. An agent target keeps the turns it
-    /// completed, as a failed turn does. The limit is per call, not per run,
-    /// so a trial with `n` evaluators can take `n + 1` times `limit`. Off
-    /// unless set.
+    /// completed, as a failed turn does.
+    ///
+    /// The limit is per trial, not per run, and per call: a trial with `n`
+    /// evaluators can take up to `n + 1` times `limit`. The turns of one
+    /// multi-turn case share the one limit (a five-turn case gets one limit
+    /// in all, not five). A timed-out judge's token usage is dropped, so the
+    /// report's judge tokens undercount. A limit too large for the clock
+    /// (such as `Duration::MAX`) is no limit. Needs a running tokio runtime,
+    /// since the limit is a `tokio::time` timer. Off unless set.
     #[must_use]
     pub fn trial_timeout(mut self, limit: Duration) -> Self {
         self.trial_timeout = Some(limit);
@@ -228,18 +234,13 @@ impl Experiment {
         );
         async move {
             let started = Instant::now();
-            let ran = match self.trial_timeout {
-                Some(limit) => {
-                    let deadline = Deadline {
-                        at: tokio::time::Instant::now() + limit,
-                        limit,
-                    };
-                    let run = TRIAL_DEADLINE.scope(deadline, target.run(case));
-                    tokio::time::timeout_at(deadline.at, run)
-                        .await
-                        .unwrap_or_else(|_| Err(timeout_message(limit).into()))
-                }
-                None => target.run(case).await,
+            let deadline = self.trial_timeout.and_then(deadline_in);
+            let run = TRIAL_DEADLINE.scope(deadline, target.run(case));
+            let ran = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline.at, run)
+                    .await
+                    .unwrap_or_else(|_| Err(timeout_message(deadline.limit).into())),
+                None => run.await,
             };
             let mut trial = Trial::new(case.id.clone(), repetition, "");
             trial.latency = started.elapsed();
@@ -269,11 +270,13 @@ impl Experiment {
                 let name = evaluator.name();
                 let failed =
                     |explanation: String| Score::fail(name, explanation).with_label("error");
-                let mut score = match self.trial_timeout {
-                    Some(limit) => {
-                        match tokio::time::timeout(limit, evaluator.evaluate(case, &trial)).await {
+                let mut score = match self.trial_timeout.and_then(deadline_in) {
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline.at, evaluator.evaluate(case, &trial))
+                            .await
+                        {
                             Ok(result) => result.unwrap_or_else(|error| failed(error.to_string())),
-                            Err(_) => failed(timeout_message(limit)),
+                            Err(_) => failed(timeout_message(deadline.limit)),
                         }
                     }
                     None => evaluator
