@@ -5,6 +5,11 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 ## Unreleased
 
 - README snippets are compile-checked as doctests, so the examples cannot rot.
+- Feature: request-scoped run state. `RunState` carries typed values (a user id, a database
+  handle) into a graph run through `run_with_state`, `stream_with_state`, `run_as_with_state` and
+  `stream_as_with_state`. Nodes made with `node_fn_with_state`, edge conditions and nested
+  graphs read it. It is never sent to a model and not checkpointed: a resumed run is given it
+  again. Existing `run`, `stream` and resume signatures are unchanged.
 
 ## 0.47.3 (2026-11-27)
 

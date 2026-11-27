@@ -12,6 +12,7 @@ use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 
 use crate::checkpoint::{Journal, Saving};
 use crate::events::{Emit, EmitText, stream_agent};
+use crate::graph::RunState;
 use crate::human::{Question, answer};
 
 /// Why a node failed: a boxed error, `Send + Sync` except on wasm.
@@ -68,6 +69,7 @@ pub struct NodeIo<'a> {
     question: Option<Emit<'a, Question>>,
     saving: Option<Saving>,
     turns: Option<usize>,
+    run: RunState,
 }
 
 impl<'a> NodeIo<'a> {
@@ -80,6 +82,7 @@ impl<'a> NodeIo<'a> {
             question: None,
             saving: None,
             turns: None,
+            run: RunState::default(),
         }
     }
 
@@ -92,6 +95,7 @@ impl<'a> NodeIo<'a> {
             question: Some(question),
             saving: None,
             turns: None,
+            run: RunState::default(),
         }
     }
 
@@ -107,9 +111,21 @@ impl<'a> NodeIo<'a> {
         self
     }
 
+    /// Give the node the request-scoped state of its run; see [`RunState`].
+    pub(crate) fn with_run_state(mut self, run: RunState) -> Self {
+        self.run = run;
+        self
+    }
+
     /// The turn budget the node's agent run gets, when the graph sets one.
     fn turns(&self) -> Option<usize> {
         self.turns
+    }
+
+    /// The request-scoped state of the run the node is part of: what the
+    /// graph was started with, see [`RunState`]. Empty for a node run by hand.
+    pub fn run_state(&self) -> &RunState {
+        &self.run
     }
 
     /// The node's id.
@@ -202,6 +218,44 @@ where
     Fut: Future<Output = Result<String, NodeError>> + WasmCompatSend + 'static,
 {
     FnNode(f)
+}
+
+/// A node that runs `f` with the request-scoped state of its run: as
+/// [`node_fn`], and `f` also gets the [`RunState`] the graph was started with.
+///
+/// ```
+/// use rig_multiagent::{RunState, node_fn_with_state};
+/// struct Prefix(&'static str);
+/// let tag = node_fn_with_state(|input: String, state: RunState| async move {
+///     let prefix = state.get::<Prefix>().map_or("", |prefix| prefix.0);
+///     Ok(format!("{prefix}{input}"))
+/// });
+/// ```
+pub fn node_fn_with_state<F, Fut>(f: F) -> StateFnNode<F>
+where
+    F: Fn(String, RunState) -> Fut + WasmCompatSend + WasmCompatSync,
+    Fut: Future<Output = Result<String, NodeError>> + WasmCompatSend + 'static,
+{
+    StateFnNode(f)
+}
+
+/// A node made of an async function that reads the run's state; see
+/// [`node_fn_with_state`].
+pub struct StateFnNode<F>(F);
+
+impl<F, Fut> Node for StateFnNode<F>
+where
+    F: Fn(String, RunState) -> Fut + WasmCompatSend + WasmCompatSync,
+    Fut: Future<Output = Result<String, NodeError>> + WasmCompatSend + 'static,
+{
+    fn run<'a>(
+        &'a self,
+        input: String,
+        io: &'a NodeIo<'a>,
+    ) -> WasmBoxedFuture<'a, Result<NodeOutput, NodeError>> {
+        let future = (self.0)(input, io.run_state().clone());
+        Box::pin(async move { Ok(NodeOutput::new(future.await?)) })
+    }
 }
 
 impl<F, Fut> Node for FnNode<F>

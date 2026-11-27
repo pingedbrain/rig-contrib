@@ -52,9 +52,13 @@ mod node;
 mod swarm;
 
 pub use checkpoint::CheckpointError;
-pub use graph::{Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState};
+pub use graph::{
+    Graph, GraphBuilder, GraphError, GraphEvent, GraphFailure, GraphRun, GraphState, RunState,
+};
 pub use human::{HumanNode, Question, human};
-pub use node::{FnNode, Node, NodeError, NodeIo, NodeOutput, node_fn};
+pub use node::{
+    FnNode, Node, NodeError, NodeIo, NodeOutput, StateFnNode, node_fn, node_fn_with_state,
+};
 /// The stores runs keep their checkpoints in.
 pub use rig_memory;
 pub use swarm::{
