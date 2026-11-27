@@ -1,9 +1,10 @@
 //! The report as JSON, JUnit XML and Markdown, and the sinks writing them.
 
 use rig_evals::{
-    Case, Experiment, JsonFile, JunitFile, Markdown, Report, TargetError, TargetOutput, evaluators,
-    target_fn,
+    Case, Experiment, JsonFile, JunitFile, Markdown, Report, TargetError, TargetOutput, ToolCall,
+    evaluators, target_fn,
 };
+use serde_json::{Value, json};
 
 use crate::tokens;
 
@@ -88,6 +89,44 @@ async fn json_round_trips() {
         serde_json::from_str::<Report>(&json).expect("parses back"),
         report
     );
+}
+
+#[tokio::test]
+async fn json_has_a_tool_result_only_where_one_was_recorded() {
+    let report = Experiment::new("tools")
+        .dataset(vec![Case::new("with", "x"), Case::new("without", "y")])
+        .target(target_fn(|case: Case| async move {
+            let mut calls = vec![ToolCall::new("noop", json!({}))];
+            if case.id == "with" {
+                calls.insert(0, ToolCall::new("add", json!({"x": 2})).with_result("5"));
+            }
+            Ok::<_, TargetError>(TargetOutput::new("ok").with_tool_calls(calls))
+        }))
+        .evaluator(evaluators::no_error())
+        .run()
+        .await
+        .expect("runs");
+    let value: Value = serde_json::from_str(&report.to_json().expect("serializes")).expect("json");
+    let trials = value
+        .pointer("/trials")
+        .and_then(Value::as_array)
+        .expect("trials");
+    let trial = |id: &str| {
+        trials
+            .iter()
+            .find(|trial| trial.pointer("/trial/case_id") == Some(&id.into()))
+            .expect("the trial")
+    };
+
+    let with = trial("with");
+    assert_eq!(
+        with.pointer("/trial/tool_calls/0/result"),
+        Some(&"5".into())
+    );
+    assert!(with.pointer("/trial/tool_calls/1/result").is_none());
+    let without = trial("without");
+    assert!(without.pointer("/trial/tool_calls/0").is_some());
+    assert!(without.pointer("/trial/tool_calls/0/result").is_none());
 }
 
 #[tokio::test]

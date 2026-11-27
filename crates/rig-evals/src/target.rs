@@ -5,7 +5,7 @@ use std::future::Future;
 
 use rig_agent::Agent;
 use rig_core::completion::Usage;
-use rig_core::message::Message;
+use rig_core::message::{Message, ToolResultContent, UserContent};
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -15,7 +15,12 @@ use crate::Case;
 /// Why a target run failed: a boxed error, `Send + Sync` except on wasm.
 pub type TargetError = rig_core::error::BoxError;
 
-/// A tool call the target made.
+/// The longest tool result kept, in bytes; a longer one is cut at a char
+/// boundary and marked `[truncated]`.
+const MAX_RESULT_BYTES: usize = 4096;
+
+/// A tool call the target made, and the result the tool returned when the
+/// target recorded it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ToolCall {
@@ -24,15 +29,28 @@ pub struct ToolCall {
     /// The arguments; a string when the model sent arguments that were not a
     /// JSON object.
     pub args: Value,
+    /// What the tool returned: its text parts (JSON as its JSON text, images
+    /// as a placeholder) joined by newlines, cut to 4 KiB. `None` when the
+    /// target did not record a result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
 }
 
 impl ToolCall {
-    /// A call to `name` with `args`.
+    /// A call to `name` with `args`, with no result.
     pub fn new(name: impl Into<String>, args: Value) -> Self {
         Self {
             name: name.into(),
             args,
+            result: None,
         }
+    }
+
+    /// Record the result the tool returned.
+    #[must_use]
+    pub fn with_result(mut self, result: impl Into<String>) -> Self {
+        self.result = Some(result.into());
+        self
     }
 }
 
@@ -45,6 +63,88 @@ impl From<&rig_core::message::ToolCall> for ToolCall {
         };
         Self::new(function.name.as_str(), args)
     }
+}
+
+/// The tool calls of one run's messages, in order, each with the result its
+/// tool returned. A result is matched to its call by id. A call with no
+/// provider id (rig issued a local one) takes the next unmatched result whose
+/// id belongs to no call of the run, so it never takes a later call's result.
+fn tool_calls_of(messages: &[Message]) -> Vec<ToolCall> {
+    let mut results: Vec<(String, Option<String>)> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::User { content } => Some(content),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|part| match part {
+            UserContent::ToolResult(result) => Some((
+                result.call.wire().into_owned(),
+                Some(render_result(&result.content)),
+            )),
+            _ => None,
+        })
+        .collect();
+    let calls: Vec<&rig_core::message::ToolCall> = messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Assistant(turn) => Some(turn),
+            _ => None,
+        })
+        .flat_map(|turn| turn.tool_calls())
+        .collect();
+    let call_ids: Vec<String> = calls
+        .iter()
+        .map(|call| call.id.wire().into_owned())
+        .collect();
+    calls
+        .into_iter()
+        .map(|call| {
+            let id = call.id.wire();
+            let slot = results
+                .iter()
+                .position(|(result_id, text)| text.is_some() && result_id == id.as_ref())
+                .or_else(|| {
+                    call.id.is_local().then(|| {
+                        results.iter().position(|(result_id, text)| {
+                            text.is_some() && !call_ids.contains(result_id)
+                        })
+                    })?
+                });
+            let tool = ToolCall::from(call);
+            let text =
+                slot.and_then(|slot| results.get_mut(slot).and_then(|(_, text)| text.take()));
+            match text {
+                Some(text) => tool.with_result(text),
+                None => tool,
+            }
+        })
+        .collect()
+}
+
+/// The text of a tool result's parts, joined by newlines and cut to
+/// [`MAX_RESULT_BYTES`].
+fn render_result(content: &[ToolResultContent]) -> String {
+    let text = content
+        .iter()
+        .map(|part| match part {
+            ToolResultContent::Text(text) => text.text.clone(),
+            ToolResultContent::Json { value } => value.to_string(),
+            ToolResultContent::Image(_) => "[image]".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if text.len() <= MAX_RESULT_BYTES {
+        return text;
+    }
+    let mut end = MAX_RESULT_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cut = text;
+    cut.truncate(end);
+    cut.push_str(" [truncated]");
+    cut
 }
 
 /// One user turn of a multi-turn run and the answer it got.
@@ -142,8 +242,8 @@ pub trait Target: WasmCompatSend + WasmCompatSync {
 impl Target for Agent {
     /// Prompts the agent with the case's input, or with each of its turns in
     /// order on one conversation (the agent keeps the history between
-    /// turns). The tool calls are the ones in the runs' transcripts; the
-    /// usage is the total over the turns. A multi-turn case that fails part
+    /// turns). The tool calls are the ones in the runs' transcripts, each with
+    /// the result its tool returned; the usage is the total over the turns. A multi-turn case that fails part
     /// way is a [`TurnFailed`] holding the turns that completed.
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
@@ -164,16 +264,7 @@ impl Target for Agent {
                         return Err(turn_error(multi, number + 1, output, error.into()));
                     }
                 };
-                output.tool_calls.extend(
-                    response
-                        .messages
-                        .iter()
-                        .filter_map(|message| match message {
-                            Message::Assistant(turn) => Some(turn),
-                            _ => None,
-                        })
-                        .flat_map(|turn| turn.tool_calls().map(ToolCall::from)),
-                );
+                output.tool_calls.extend(tool_calls_of(&response.messages));
                 output.usage += response.usage;
                 let answer = response.output();
                 output.transcript.push(Turn::new(input, answer.clone()));
@@ -300,5 +391,44 @@ impl<N: rig_multiagent::Node> Target for NodeTarget<N> {
             let output = self.0.run((*prompt).to_owned(), &io).await?;
             Ok(TargetOutput::new(output.text).with_usage(output.usage))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rig_core::message::{AssistantContent, Text};
+    use rig_core::message::{
+        AssistantMessage, CallId, LocalCallId, ToolFunction, ToolName, ToolResultContent,
+        UserContent,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_local_id_call_does_not_take_a_later_provider_call_result() {
+        let call = |id: CallId, name: &str| {
+            AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                id,
+                ToolFunction::new(ToolName::new(name).expect("name"), serde_json::json!({})),
+            ))
+        };
+        let messages = [
+            Message::Assistant(AssistantMessage::new(vec![
+                call(CallId::Local(LocalCallId::new()), "first"),
+                call(CallId::from_wire("p2"), "second"),
+            ])),
+            Message::User {
+                content: vec![UserContent::tool_result(
+                    CallId::from_wire("p2"),
+                    ToolName::new("second").expect("name"),
+                    vec![ToolResultContent::Text(Text::new("B"))],
+                )],
+            },
+        ];
+        let results: Vec<Option<String>> = tool_calls_of(&messages)
+            .into_iter()
+            .map(|call| call.result)
+            .collect();
+        assert_eq!(results, [None, Some("B".to_owned())]);
     }
 }
