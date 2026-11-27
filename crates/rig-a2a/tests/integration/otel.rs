@@ -38,11 +38,11 @@ struct Capture {
     telemetry: Telemetry,
     spans: InMemorySpanExporter,
     _guard: tracing::subscriber::DefaultGuard,
-    _second: tracing::Dispatch,
 }
 
 impl Capture {
     fn start() -> anyhow::Result<Self> {
+        crate::pin_global_default();
         let spans = InMemorySpanExporter::default();
         let (telemetry, subscriber) = Telemetry::builder()
             .span_exporter(spans.clone())
@@ -53,9 +53,6 @@ impl Capture {
             telemetry,
             spans,
             _guard: tracing::subscriber::set_default(subscriber),
-            // See tests/integration/tracing.rs: a second live dispatcher makes
-            // tracing-core ask this thread's subscriber about every callsite.
-            _second: tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()),
         })
     }
 
