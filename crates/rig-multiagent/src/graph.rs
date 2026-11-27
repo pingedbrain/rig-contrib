@@ -996,7 +996,7 @@ impl Graph {
                             finished.push(index);
                         }
                         Some(Err(source)) => {
-                            tracing::warn!(graph.node = %id, error = %source, "graph node failed");
+                            tracing::warn!(graph.node = %id, kind = "node_failed", "graph node failed");
                             failures.push(GraphFailure::Node { node: id, source });
                         }
                         None => failures.push(GraphFailure::NodeTimeout { node: id }),
@@ -1011,8 +1011,11 @@ impl Graph {
                         let saved = snapshot(
                             &state, &usage, &last, counted, &remaining, &finished, &failures,
                         );
-                        if let Err(error) = checkpoints.save(id, &saved).await {
-                            tracing::warn!(%error, "could not save a finished graph node");
+                        if checkpoints.save(id, &saved).await.is_err() {
+                            tracing::warn!(
+                                kind = "checkpoint",
+                                "could not save a finished graph node"
+                            );
                         }
                     }
                 }
@@ -1035,8 +1038,8 @@ impl Graph {
         {
             // Finished, or the failed nodes to run again next time.
             let saved = snapshot(&state, &usage, &last, executions, &[], &[], &failures);
-            if let Err(error) = checkpoints.save(id, &saved).await {
-                tracing::warn!(%error, "could not save the graph run's end");
+            if checkpoints.save(id, &saved).await.is_err() {
+                tracing::warn!(kind = "checkpoint", "could not save the graph run's end");
             }
         }
         let run = GraphRun {
