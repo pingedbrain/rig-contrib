@@ -35,6 +35,24 @@ pub fn set_session(
     span.set_parent(cx)
 }
 
+/// The outer span of one agent run, named and tagged the way GenAI backends
+/// read an agent run: `invoke_agent <name>`, with `gen_ai.operation.name`
+/// `invoke_agent` and `gen_ai.agent.name`.
+///
+/// Use it where a `conversation` span would go, and pass it to
+/// [`set_session`]. Rig adopts an enabled outer span as the run's span, and
+/// creates no `invoke_agent` span of its own, so any other outer span leaves
+/// the run without one. Rig records the run's prompt, answer and usage only
+/// on a span it creates, so they are not on this one.
+pub fn agent_span(name: &str) -> tracing::Span {
+    tracing::info_span!(
+        "invoke_agent",
+        otel.name = %format!("invoke_agent {name}"),
+        gen_ai.operation.name = "invoke_agent",
+        gen_ai.agent.name = name,
+    )
+}
+
 /// Copies the session in a span's context into its attributes, as each span
 /// starts.
 #[derive(Debug)]

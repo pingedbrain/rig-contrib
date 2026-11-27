@@ -77,7 +77,7 @@ async fn run(otlp: bool) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // 2. A conversation: its span and everything under it carry session.id.
-    let conversation = tracing::info_span!("conversation");
+    let conversation = rig_otel::agent_span("assistant");
     rig_otel::set_session(&conversation, SESSION, None)?;
     let agent = scripted_agent("Hello from the scripted model.");
     let answer = ask(&agent, "Say hello.", conversation.clone()).await?;
