@@ -2,6 +2,13 @@
 
 Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- `examples/swarm_graph.rs`: the Swarm, streaming and Graph snippets, on scripted models
+  with no key; `OPENROUTER_MODEL` (with `OPENROUTER_API_KEY`) runs them live.
+- Docs: swarm agents need `.default_max_turns(n)`. Rig's default of one turn fails a
+  tool call that the agent must answer after, such as a refused handoff.
+
 ## 0.47.2 (2026-11-26)
 
 - docs.rs documents every feature, each item marked with the feature it needs.

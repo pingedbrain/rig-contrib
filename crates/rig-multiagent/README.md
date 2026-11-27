@@ -58,7 +58,11 @@ the token usage of every model call (stopped turns included) and the elapsed tim
 `SwarmError` carries the same trail up to the failure.
 
 The swarm adds `handoff_to_agent` to each agent's tool set, which clones of the agent
-share.
+share. Give each agent a turn budget with `.default_max_turns(n)`, as in
+`examples/swarm_graph.rs`. A handoff that goes through ends the turn, so one turn would
+do for it, but a tool call whose result the agent must read first (a refused handoff, or
+any other tool) needs a second. Rig's default is one turn, and the swarm does not raise
+it, so such a call fails with `MaxTurns`.
 
 ## Graph
 
