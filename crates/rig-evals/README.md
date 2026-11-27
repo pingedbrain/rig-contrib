@@ -62,8 +62,8 @@ case: loop over `case.prompts()`, and return the last answer with `transcript` s
 ## Targets
 
 A `Target` runs a case. Rig agents are targets: the trial gets the answer, the tool calls
-from the run's transcript, and the run's token usage (summed over the turns of a
-multi-turn case). `target_fn` wraps an async
+from the run's transcript with the result each tool returned (`ToolCall::result`, cut to 4 KiB),
+and the run's token usage (summed over the turns of a multi-turn case). `target_fn` wraps an async
 function. With the `multiagent` feature, `node_target` wraps a rig-multiagent swarm,
 graph or node (answer and usage; nodes do not report tool calls).
 
@@ -87,7 +87,8 @@ An `Evaluator` scores a trial from 0 to 1 and says whether it passed.
 `LlmJudge::helpfulness`, `LlmJudge::faithfulness` and `LlmJudge::goal_success` are judges
 with a fixed rubric, named `helpfulness`, `faithfulness` and `goal_success`. They share the
 judge's prompt, its 0 to 1 score and its threshold (0.5 unless set). Faithfulness checks the
-answer against the transcript, the tool calls and the case's references; goal success reads
+answer against the transcript, the tool calls with their recorded results and the case's
+references; goal success reads
 every turn of a multi-turn case.
 
 ```rust,no_run

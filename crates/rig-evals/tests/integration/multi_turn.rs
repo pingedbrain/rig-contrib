@@ -245,6 +245,32 @@ async fn a_judge_reads_every_turn_and_the_transcript() {
 }
 
 #[tokio::test]
+async fn each_turn_keeps_the_results_of_its_own_tool_calls() {
+    use rig_agent::test_utils::MockAddTool;
+    use serde_json::json;
+
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("call-1", "add", json!({"x": 2, "y": 3})),
+        MockTurn::text("It is 5."),
+        MockTurn::tool_call("call-2", "add", json!({"x": 5, "y": 1})),
+        MockTurn::text("It is 6."),
+    ]);
+    let agent = AgentBuilder::new(model)
+        .tool(MockAddTool)
+        .default_max_turns(3)
+        .build();
+    let case = Case::multi_turn("sums", ["What is 2 + 3?", "Now add 1."]);
+    let output = Target::run(&agent, &case).await.expect("runs");
+
+    let results: Vec<_> = output
+        .tool_calls
+        .iter()
+        .map(|call| call.result.as_deref())
+        .collect();
+    assert_eq!(results, [Some("5"), Some("6")]);
+}
+
+#[tokio::test]
 async fn a_turn_one_tool_call_is_in_the_history_of_turn_two() {
     use rig_agent::test_utils::MockAddTool;
     use serde_json::json;
