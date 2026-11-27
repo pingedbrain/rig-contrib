@@ -498,3 +498,53 @@ async fn a_rate_limited_provider_is_reported_so_the_caller_can_retry() -> anyhow
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn a_tool_agent_without_a_turn_budget_tells_the_caller_how_to_raise_it() -> anyhow::Result<()>
+{
+    // No `default_max_turns`: the one-call budget ends the run after the tool call.
+    let model = MockCompletionModel::from_stream_turns([vec![
+        MockStreamEvent::tool_call("call-1", "add", json!({"a": 1, "b": 2})),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    let agent = AgentBuilder::new(model).name("Helper").tool(Add).build();
+    let (client, _) = connect(McpServer::new("test").agent(agent)).await?;
+    let result = client
+        .call_tool(call("helper", json!({"message": "hi"})))
+        .await?;
+    let text = format!("{:?}", result.content);
+    ensure!(result.is_error == Some(true), "{result:?}");
+    ensure!(
+        text.contains("turn limit (1)") && text.contains("AgentBuilder::default_max_turns(n)"),
+        "the hint names the limit and the fix: {text}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_run_that_finishes_gets_no_turn_hint() -> anyhow::Result<()> {
+    let model = MockCompletionModel::from_stream_turns([
+        vec![
+            MockStreamEvent::tool_call("call-1", "add", json!({"a": 1, "b": 2})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("Done."),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]);
+    let agent = AgentBuilder::new(model)
+        .name("Helper")
+        .tool(Add)
+        .default_max_turns(2)
+        .build();
+    let (client, _) = connect(McpServer::new("test").agent(agent)).await?;
+    let result = client
+        .call_tool(call("helper", json!({"message": "hi"})))
+        .await?;
+    let text = format!("{:?}", result.content);
+    ensure!(result.is_error != Some(true), "{result:?}");
+    ensure!(text.contains("Done."), "{text}");
+    ensure!(!text.contains("default_max_turns"), "{text}");
+    Ok(())
+}
