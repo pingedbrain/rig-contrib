@@ -9,6 +9,9 @@
 //!
 //! `PORT` defaults to 3000; with `A2A_TOKEN` set, calls need that bearer token.
 
+use std::process::ExitCode;
+
+use anyhow::Context as _;
 use rig_a2a::A2aServer;
 use rig_agent::AgentBuilder;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -17,8 +20,28 @@ use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 const REPLIES: usize = 1_000;
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let port: u16 = std::env::var("PORT").map_or(Ok(3000), |port| port.parse())?;
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// `PORT`, or `default` when it is not set. A value that is not a port number is an error.
+fn port(default: u16) -> anyhow::Result<u16> {
+    match std::env::var("PORT") {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("PORT must be a port number from 0 to 65535, got {value:?}")),
+        Err(_) => Ok(default),
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
+    let port = port(3000)?;
     let turns = (0..REPLIES).map(|_| {
         vec![
             MockStreamEvent::text("po"),
@@ -36,7 +59,9 @@ async fn main() -> anyhow::Result<()> {
     if let Ok(token) = std::env::var("A2A_TOKEN") {
         server = server.bearer_token(token);
     }
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| format!("could not listen on 127.0.0.1:{port}"))?;
     eprintln!("echo agent ready at {url}");
     rig_a2a::axum::serve(listener, server.into_router()).await?;
     Ok(())

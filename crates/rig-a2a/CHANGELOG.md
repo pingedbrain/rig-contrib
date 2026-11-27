@@ -4,6 +4,8 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Examples `a2a_serve` and `a2a_echo_server` print one line on failure (`error: could not listen on
+  localhost:3000: ...`, or the `PORT` value that is not a number) instead of Rust's `Debug` output.
 - Docs: the front page and README show calling a remote agent directly (`RemoteAgent::send`) and as a tool, and where content recording is set.
 - Agents that hit their turn limit now say how to raise it: the failed task names `AgentBuilder::default_max_turns(n)`. Error variants and statuses are unchanged.
 - Example `serve` is renamed `a2a_serve`: it clashed with the `serve` example of rig-agentcore. Run it with `cargo run --example a2a_serve`.
