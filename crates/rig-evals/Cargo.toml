@@ -39,7 +39,7 @@ uuid = { version = "1", features = ["v4"], optional = true }
 opentelemetry = "0.32"
 opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 rig-agent = { version = "0.47", default-features = false, features = ["test-utils"] }
-rig-core = { version = "0.47", default-features = false, features = ["test-utils"] }
+rig-core = { version = "0.47", default-features = false, features = ["reqwest", "rustls", "test-utils"] }
 rig-otel = { version = "0.47.0", path = "../rig-otel", default-features = false }
 tempfile = "3"
 xmlparser = "0.13"
