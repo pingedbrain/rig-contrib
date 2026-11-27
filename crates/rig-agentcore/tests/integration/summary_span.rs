@@ -5,7 +5,9 @@
 use rig_agent::AgentBuilder;
 use rig_agentcore::{AgentCoreApp, SESSION_HEADER};
 use rig_core::completion::Usage;
-use rig_core::test_utils::{CapturedSpan, MockCompletionModel, MockTurn, TraceCapture};
+use rig_core::test_utils::{
+    CapturedSpan, MockCompletionModel, MockStreamEvent, MockTurn, TraceCapture,
+};
 use serde_json::json;
 
 async fn serve(app: AgentCoreApp) -> String {
@@ -171,5 +173,133 @@ async fn the_prompt_and_summary_are_recorded_with_record_content() {
     assert!(
         span.text("agentcore.summary.prompt")
             .is_some_and(|p| p.contains("question 1"))
+    );
+}
+
+/// Everything a capture kept, as text: every event field and every span value.
+fn everything_logged(capture: &TraceCapture) -> String {
+    let mut logged = capture.warnings().join("\n");
+    for event in capture.events() {
+        logged.push_str(&format!("\n{:?}", event.fields));
+    }
+    for span in capture.spans() {
+        logged.push_str(&format!("\n{:?}", span.values()));
+    }
+    logged
+}
+
+/// A summarizer whose error text carries `sentinel`, as a provider's may.
+async fn failing_summary(record: bool, sentinel: &str) -> TraceCapture {
+    crate::pin_global_default();
+    let capture = TraceCapture::default();
+    let _guard = tracing::subscriber::set_default(capture.subscriber());
+    let main =
+        MockCompletionModel::from_turns((1..=4).map(|n| MockTurn::text(format!("answer {n}"))));
+    let summarizer = MockCompletionModel::from_turns([MockTurn::error(format!(
+        "provider rejected the prompt: {sentinel}"
+    ))]);
+    four_invocations(&main, &summarizer, record).await;
+    capture
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failing_summarizer_logs_only_its_kind_without_record_content() {
+    let capture = failing_summary(false, "SENTINEL-HIDDEN").await;
+    assert!(
+        capture
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("could not summarize")),
+        "the failure is still a warning"
+    );
+    assert!(
+        !everything_logged(&capture).contains("SENTINEL-HIDDEN"),
+        "provider text reached a log or span without record_content"
+    );
+    assert!(
+        capture
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("run_failed")),
+        "the kind is logged instead"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failing_summarizers_text_is_logged_with_record_content() {
+    let capture = failing_summary(true, "SENTINEL-SHOWN").await;
+    assert!(
+        everything_logged(&capture).contains("SENTINEL-SHOWN"),
+        "with record_content the full error text is logged"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_agent_run_logs_no_provider_text_without_record_content() {
+    crate::pin_global_default();
+    let capture = TraceCapture::default();
+    let _guard = tracing::subscriber::set_default(capture.subscriber());
+    let main = MockCompletionModel::from_turns([MockTurn::error("provider echoed SENTINEL-RUN")]);
+    let app = AgentCoreApp::new(AgentBuilder::new(main).build());
+    let url = serve(app).await;
+    let response = reqwest::Client::new()
+        .post(format!("{url}/invocations"))
+        .json(&json!({"prompt": "hello"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 500);
+    assert!(
+        capture
+            .warnings()
+            .iter()
+            .any(|warning| warning.contains("agent run failed")),
+        "the failure is still a warning"
+    );
+    assert!(!everything_logged(&capture).contains("SENTINEL-RUN"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn the_summary_span_is_under_the_invocation_on_the_sse_path() {
+    crate::pin_global_default();
+    let capture = TraceCapture::default();
+    let _guard = tracing::subscriber::set_default(capture.subscriber());
+    // Streamed turns for the agent; the summarizer runs without streaming.
+    let main = MockCompletionModel::from_stream_turns((1..=4).map(|n| {
+        [
+            MockStreamEvent::text(format!("answer {n}")),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]
+    }));
+    let summarizer = MockCompletionModel::from_turns([MockTurn::text("SUMMARY-SSE")]);
+    let app = AgentCoreApp::new(AgentBuilder::new(main).build()).summarize_history(
+        AgentBuilder::new(summarizer).build(),
+        2,
+        4,
+    );
+    let url = serve(app).await;
+    for question in 1..=4 {
+        // Drain each event stream so its run, and any summary, finishes first.
+        let body = reqwest::Client::new()
+            .post(format!("{url}/invocations"))
+            .header(SESSION_HEADER, "session-sse")
+            .header("accept", "text/event-stream")
+            .json(&json!({"prompt": format!("question {question}")}))
+            .send()
+            .await
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert!(body.contains("\"response\""), "{body}");
+    }
+
+    let found = summaries(&capture);
+    assert_eq!(found.len(), 1, "one attempt, one span");
+    let span = found.first().expect("one span");
+    assert_eq!(span.parent_name, Some("agentcore.invocation"));
+    assert_eq!(
+        span.text("agentcore.summary.outcome").as_deref(),
+        Some("summarized")
     );
 }
