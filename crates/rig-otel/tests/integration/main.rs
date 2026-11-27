@@ -3,7 +3,8 @@
     clippy::expect_used,
     clippy::panic,
     clippy::unwrap_used,
-    clippy::unreachable
+    clippy::unreachable,
+    clippy::indexing_slicing
 )]
 
 mod otel;

@@ -4,6 +4,7 @@
 
 - The CloudWatch exporters (`aws_cloudwatch`) time out: 10 s per request by default, set by `OTEL_EXPORTER_OTLP_TRACES_TIMEOUT` / `OTEL_EXPORTER_OTLP_METRICS_TIMEOUT` or `OTEL_EXPORTER_OTLP_TIMEOUT` (milliseconds; zero is ignored), with a 5 s connect timeout. A hung endpoint no longer stalls the batch exporter or shutdown.
 - README snippets are compile-checked as doctests; the conversation example awaits the prompt inside an async block before `.instrument(span)`.
+- New metrics read from the same spans, named as Strands Agents names them: `strands.tool.call_count`, `strands.tool.success_count`, `strands.tool.error_count`, `strands.tool.duration`, `strands.event_loop.cycle_count` and `strands.event_loop.cycle_duration`. The existing GenAI metrics are unchanged. See the README's metrics table.
 
 ## 0.47.3 (2026-11-27)
 
