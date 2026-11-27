@@ -43,13 +43,15 @@ use rig_agent::AgentBuilder;
 use rig_core::DynModel;
 use rig_core::operation::Completion;
 use rig_core::providers::{opencode, openrouter};
-use rig_core::test_utils::{MockCompletionModel, MockTurn};
+use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
 use serde_json::json;
 
 const OPENING_TIME: &str = "07:45";
 const QUESTION: &str = "When does the Harbor Library open on Tuesday? Ask the library desk.";
 /// The remote agent's card name, as the tool name the planner sees.
 const REMOTE_TOOL: &str = "harbor_library_desk";
+/// The desk's scripted reply. It reaches the planner only through the tool result.
+const DESK_REPLY: &str = "The Harbor Library opens at 07:45 on Tuesdays.";
 
 /// A live model from the environment, with a label for the output. `None` when
 /// neither `RIG_MODEL` nor `OPENROUTER_MODEL` is set.
@@ -71,24 +73,26 @@ fn live_model_from_env() -> Result<Option<(DynModel<Completion>, String)>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // The scripted mocks are kept so the run can check that the desk was called.
-    let (desk_model, planner_model, label, scripted_desk) = match live_model_from_env()? {
+    // The scripted mocks are kept so the run can check the calls they received.
+    let (desk_model, planner_model, label, scripted) = match live_model_from_env()? {
         Some((model, label)) => (model.clone(), model, label, None),
         None => {
-            let desk = MockCompletionModel::from_turns([MockTurn::text(format!(
-                "The Harbor Library opens at {OPENING_TIME} on Tuesdays."
-            ))]);
+            // The A2A server streams its replies, so the desk's script is a stream turn.
+            let desk = MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::text(DESK_REPLY),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]]);
             let planner = MockCompletionModel::from_turns([
                 MockTurn::tool_call("call-1", REMOTE_TOOL, json!({"message": QUESTION})),
                 MockTurn::text(format!(
-                    "According to the Harbor Library desk, it opens at {OPENING_TIME} on Tuesdays."
+                    "According to the Harbor Library desk: {DESK_REPLY}"
                 )),
             ]);
             (
                 desk.clone().into(),
-                planner.into(),
+                planner.clone().into(),
                 "scripted (set RIG_MODEL or OPENROUTER_MODEL for a live run)".to_owned(),
-                Some(desk),
+                Some((desk, planner.clone())),
             )
         }
     };
@@ -125,11 +129,20 @@ async fn main() -> Result<()> {
 
     let response = planner.prompt(QUESTION).await?;
     println!("{}", response.output());
-    if let Some(desk) = scripted_desk {
+    if let Some((desk, planner)) = scripted {
         ensure!(
             desk.request_count() == 1,
             "the remote agent was called {} times, expected once",
             desk.request_count()
+        );
+        // The planner's second request must carry the tool result, so the desk's reply.
+        let requests = planner.requests();
+        let second = requests
+            .get(1)
+            .context("the planner made no second request after the tool call")?;
+        ensure!(
+            serde_json::to_string(second)?.contains(DESK_REPLY),
+            "the planner's second request does not carry the desk's reply"
         );
     }
     ensure!(

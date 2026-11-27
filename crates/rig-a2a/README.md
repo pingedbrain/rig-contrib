@@ -211,7 +211,7 @@ files produced by tools (only the model's own images become file parts).
 | `cargo run --example a2a_serve` | An OpenAI-backed agent served over A2A (`OPENAI_API_KEY`) |
 | `cargo run --example a2a_echo_server` | A keyless, deterministic agent answering `pong` (for tests) |
 | `cargo run --example call -- <url> <text>` | Call any A2A agent, v1.0 or v0.3, streaming the answer |
-| `cargo run --example remote_tool` | A local Rig agent that calls a remote A2A agent as a tool. Keyless by default (scripted models); `RIG_MODEL` for a live run on OpenRouter or OpenCode Go |
+| `cargo run --example remote_tool` | A local Rig agent that calls a remote A2A agent as a tool. Keyless by default (scripted models); `RIG_MODEL` or `OPENROUTER_MODEL` for a live run |
 
 ## Testing and CI
 
