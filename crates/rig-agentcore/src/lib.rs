@@ -52,13 +52,15 @@ use rig_core::message::Message;
 use rig_core::streaming::{Item, StreamEvent};
 use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
 use rig_memory::AsyncStore;
-use rig_memory::recent::{Recent, TokenBudget, view};
+use rig_memory::recent::{LastMessages, Recent, TokenBudget, view};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::history::{HistoryError, HistoryStore, InMemory, Persistent, local_id};
+use crate::history::{
+    HistoryError, HistoryStore, InMemory, Persistent, Summarizing, local_id, summarize,
+};
 
 /// The header AgentCore Runtime names the session with.
 pub const SESSION_HEADER: &str = "x-amzn-bedrock-agentcore-runtime-session-id";
@@ -106,6 +108,7 @@ struct Inner {
     agent: Agent,
     history: Arc<dyn HistoryStore>,
     window: Arc<dyn Recent>,
+    summarizing: Option<Summarizing>,
     record_content: bool,
 }
 
@@ -117,6 +120,7 @@ impl AgentCoreApp {
                 agent,
                 history: Arc::new(InMemory::new(DEFAULT_MAX_SESSIONS)),
                 window: Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
+                summarizing: None,
                 record_content: false,
             }),
         }
@@ -167,6 +171,44 @@ impl AgentCoreApp {
     #[must_use]
     pub fn history_window(self, window: impl Recent + 'static) -> Self {
         self.rebuild(|inner| inner.window = Arc::new(window))
+    }
+
+    /// Summarize a session's older history with `summarizer`, an agent
+    /// without tools, once the session holds more than `trigger_messages`
+    /// messages. The messages before the newest `keep_recent` are replaced by
+    /// one summary message, which becomes the session's first message; the
+    /// newest messages stay verbatim. The cut never separates a tool call from
+    /// its result. Summarizing runs before the invocation answers, so the
+    /// answer waits for it.
+    ///
+    /// Set `trigger_messages` above `keep_recent`. The summary is made from the
+    /// messages it replaces, including an earlier summary, so it carries on
+    /// from one summary to the next. Without a store, the summary is kept in
+    /// memory with the session, and the window does not trim the session until
+    /// it is summarized. With [`history_store`](Self::history_store), the
+    /// summary is written to the store's log in place of the messages it
+    /// replaces, which the log keeps in its history.
+    ///
+    /// If the summary fails (the summarizer errors or returns nothing, or the
+    /// store refuses the change), a warning is logged, the session keeps its
+    /// full history, and the invocation answers from it as usual. The next
+    /// invocation tries again. The window still applies to what is sent, so a
+    /// summary older than the window's budget is not sent: keep the window wide
+    /// enough for the summary and the kept messages.
+    #[must_use]
+    pub fn summarize_history(
+        self,
+        summarizer: Agent,
+        keep_recent: usize,
+        trigger_messages: usize,
+    ) -> Self {
+        self.rebuild(|inner| {
+            inner.summarizing = Some(Summarizing {
+                summarizer,
+                keep_recent,
+                trigger_messages,
+            });
+        })
     }
 
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
@@ -299,9 +341,17 @@ async fn invoke(
 }
 
 /// The session's conversation as a request sends it: the newest messages
-/// the window keeps.
+/// the window keeps, after a summary when the history has grown past the
+/// summarizing trigger.
 async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, HistoryError> {
-    let messages = inner.history.load(session).await?;
+    let mut messages = inner.history.load(session).await?;
+    if let Some(summarizing) = &inner.summarizing
+        && messages.len() > summarizing.trigger_messages
+        && let Some(summarized) =
+            summarize(inner.history.as_ref(), summarizing, session, &messages).await
+    {
+        messages = summarized;
+    }
     Ok(view(&messages, inner.window.as_ref())
         .iter()
         .map(|message| (**message).clone())
@@ -344,11 +394,15 @@ async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
 /// Add a finished run to its session. A save that fails is logged, not
 /// reported: the answer was already produced.
 async fn save(inner: &Inner, session: &str, messages: Vec<Message>) {
-    if let Err(failure) = inner
-        .history
-        .append(session, messages, inner.window.as_ref())
-        .await
-    {
+    // With a summarizer, the session is kept whole until it is summarized:
+    // trimming it to the window here would drop the summary with the messages
+    // before it.
+    let keep_all = LastMessages(usize::MAX);
+    let window: &dyn Recent = match inner.summarizing {
+        Some(_) => &keep_all,
+        None => inner.window.as_ref(),
+    };
+    if let Err(failure) = inner.history.append(session, messages, window).await {
         tracing::warn!(error = %failure, "could not save the conversation");
     }
 }

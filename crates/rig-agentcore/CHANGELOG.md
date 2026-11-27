@@ -15,6 +15,11 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
   hashed into its log name, so any AgentCore session id works. A save that loses a race
   retries up to 10 times; if it still fails, the answer is returned, the failure is logged,
   and that turn is not persisted.
+- `AgentCoreApp::summarize_history(summarizer, keep_recent, trigger_messages)`: opt-in. Past
+  `trigger_messages`, a session's older messages become one summary (its first message), made
+  by an agent without tools; the newest `keep_recent` stay verbatim and a tool call is never
+  split from its result. A failed summary is logged and the full history is kept. Built on
+  rig-memory's compaction helpers, as rig-memory has no summarizing window.
 - `rig_agentcore::rig_memory` re-exports rig-memory, so the API follows rig-memory 0.47.x.
 - `examples/serve.rs`: serves the contract locally on `PORT` (default 8080), on a scripted
   model or on OpenRouter when `OPENROUTER_MODEL` and `OPENROUTER_API_KEY` are set.
