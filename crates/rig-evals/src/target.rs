@@ -66,9 +66,9 @@ impl From<&rig_core::message::ToolCall> for ToolCall {
 }
 
 /// The tool calls of one run's messages, in order, each with the result its
-/// tool returned. A result is matched to its call by id; a call the provider
-/// sent with no id (rig issued a local one) takes the next unmatched result
-/// in order instead.
+/// tool returned. A result is matched to its call by id. A call with no
+/// provider id (rig issued a local one) takes the next unmatched result whose
+/// id belongs to no call of the run, so it never takes a later call's result.
 fn tool_calls_of(messages: &[Message]) -> Vec<ToolCall> {
     let mut results: Vec<(String, Option<String>)> = messages
         .iter()
@@ -85,23 +85,31 @@ fn tool_calls_of(messages: &[Message]) -> Vec<ToolCall> {
             _ => None,
         })
         .collect();
-    messages
+    let calls: Vec<&rig_core::message::ToolCall> = messages
         .iter()
         .filter_map(|message| match message {
             Message::Assistant(turn) => Some(turn),
             _ => None,
         })
         .flat_map(|turn| turn.tool_calls())
+        .collect();
+    let call_ids: Vec<String> = calls
+        .iter()
+        .map(|call| call.id.wire().into_owned())
+        .collect();
+    calls
+        .into_iter()
         .map(|call| {
             let id = call.id.wire();
             let slot = results
                 .iter()
                 .position(|(result_id, text)| text.is_some() && result_id == id.as_ref())
                 .or_else(|| {
-                    call.id
-                        .is_local()
-                        .then(|| results.iter().position(|(_, text)| text.is_some()))
-                        .flatten()
+                    call.id.is_local().then(|| {
+                        results.iter().position(|(result_id, text)| {
+                            text.is_some() && !call_ids.contains(result_id)
+                        })
+                    })?
                 });
             let tool = ToolCall::from(call);
             let text =
@@ -383,5 +391,44 @@ impl<N: rig_multiagent::Node> Target for NodeTarget<N> {
             let output = self.0.run((*prompt).to_owned(), &io).await?;
             Ok(TargetOutput::new(output.text).with_usage(output.usage))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rig_core::message::{AssistantContent, Text};
+    use rig_core::message::{
+        AssistantMessage, CallId, LocalCallId, ToolFunction, ToolName, ToolResultContent,
+        UserContent,
+    };
+
+    use super::*;
+
+    #[test]
+    fn a_local_id_call_does_not_take_a_later_provider_call_result() {
+        let call = |id: CallId, name: &str| {
+            AssistantContent::ToolCall(rig_core::message::ToolCall::new(
+                id,
+                ToolFunction::new(ToolName::new(name).expect("name"), serde_json::json!({})),
+            ))
+        };
+        let messages = [
+            Message::Assistant(AssistantMessage::new(vec![
+                call(CallId::Local(LocalCallId::new()), "first"),
+                call(CallId::from_wire("p2"), "second"),
+            ])),
+            Message::User {
+                content: vec![UserContent::tool_result(
+                    CallId::from_wire("p2"),
+                    ToolName::new("second").expect("name"),
+                    vec![ToolResultContent::Text(Text::new("B"))],
+                )],
+            },
+        ];
+        let results: Vec<Option<String>> = tool_calls_of(&messages)
+            .into_iter()
+            .map(|call| call.result)
+            .collect();
+        assert_eq!(results, [None, Some("B".to_owned())]);
     }
 }

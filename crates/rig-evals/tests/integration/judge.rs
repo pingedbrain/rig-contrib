@@ -72,7 +72,7 @@ async fn the_faithfulness_prompt_carries_the_tool_results() {
     assert!(sent.contains("Result: Sunny, 24 degrees"), "{sent}");
     assert!(sent.contains("clock({})"), "{sent}");
     assert!(
-        sent.contains("Where a tool's result is not recorded"),
+        sent.contains("Leave out of the score any claim whose only source is a tool result that is not recorded"),
         "the rubric lacks the no-source rule"
     );
 }
@@ -239,7 +239,7 @@ async fn faithfulness_sends_the_transcript_and_tool_calls_and_parses_the_score()
     let sent = sent(&model);
     for part in [
         "Score whether the answer is faithful",
-        "Where a tool's result is not recorded",
+        "Leave out of the score any claim whose only source is a tool result that is not recorded",
         "lookup_fare",
         "LIS-OPO",
         "How much is the train?",

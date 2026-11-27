@@ -49,7 +49,7 @@ Do not reward length or tone on their own.";
 
 /// The rubric of [`LlmJudge::faithfulness`].
 const FAITHFULNESS: &str = "\
-Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made with the results they returned (when recorded), the expected answer and the assertions. A tool result may be cut short. Where a tool's result is not recorded, do not mark a claim unsupported only because its source is not shown.
+Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made with the results they returned (when recorded), the expected answer and the assertions. Leave out of the score any claim whose only source is a tool result that is not recorded or was cut short; score the remaining claims.
 - 1: every factual claim in the answer is supported by the evidence.
 - 0.5: most claims are supported, but one claim is unsupported or only partly supported.
 - 0: the answer contradicts the evidence, or most of its factual claims are unsupported by it.
