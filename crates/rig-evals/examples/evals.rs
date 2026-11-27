@@ -4,7 +4,8 @@
 //! score N/A for the evaluators that need one.
 //!
 //! ```sh
-//! # No key: a scripted target and a scripted judge. Exits 0.
+//! # No key: a scripted target and a scripted judge. These are test mocks, not
+//! # models: replace `scripted_target` and `scripted_judge` with real ones.
 //! cargo run -p rig-evals --example evals
 //!
 //! # Live: an agent and a judge on OpenRouter. Both variables are needed; the
@@ -14,7 +15,9 @@
 //! ```
 //!
 //! The report goes to stdout; the mode and the JUnit path go to stderr. The
-//! exit code is the report's: 1 when an evaluator misses its threshold.
+//! JUnit path is relative to the directory `cargo run` is started in (not the
+//! package), so it lands in `./target/evals/` there. The exit code is the
+//! report's: 1 when an evaluator misses its threshold.
 
 use std::error::Error;
 
