@@ -75,11 +75,12 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
   is what AgentCore Observability and AgentCore Evaluations read.
-- **Limits:** each invocation holds a slot while it runs; at most 32 run at once
-  (`max_concurrent_tasks`), and an invocation beyond that gets 429 before the agent
-  runs. A run stops after 600 seconds (`max_run_duration`): it answers 504, or an
-  `{"error"}` event when streaming, and its turn is not kept. A body over 2 MB
-  (`max_request_bytes`) gets 413.
+- **Limits:** all opt-in. `max_concurrent_tasks` caps invocations running at once (past
+  the cap, 429 before the agent runs; no cap by default, since AgentCore Runtime gives each
+  session its own microVM). `max_run_duration` stops an invocation, summarizing included,
+  after a time (504, or an `{"error"}` event when streaming, and its turn is not kept; no
+  limit by default). `max_request_bytes` sets the body limit (default 2 MB, answered with 413).
+  Outside AgentCore Runtime, a cap around 32 and a ten-minute run limit suit most agents.
 
   ```rust
   use std::time::Duration;
@@ -89,8 +90,8 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
 
   fn limited(agent: Agent) -> AgentCoreApp {
       AgentCoreApp::new(agent)
-          .max_concurrent_tasks(8)
-          .max_run_duration(Duration::from_secs(120))
+          .max_concurrent_tasks(32)
+          .max_run_duration(Duration::from_secs(600))
           .max_request_bytes(256 * 1024)
   }
   ```

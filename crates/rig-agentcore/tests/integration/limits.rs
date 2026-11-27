@@ -211,3 +211,28 @@ async fn the_body_limit_is_an_option_and_malformed_bodies_stay_400() {
         .unwrap();
     assert_eq!(malformed.status(), 400);
 }
+
+#[tokio::test]
+async fn a_hung_summary_is_stopped_with_the_run_and_the_history_kept() {
+    let main = MockCompletionModel::from_turns([MockTurn::text("one"), MockTurn::text("two")]);
+    let summarizer =
+        MockCompletionModel::from_turns([MockTurn::tool_call("call-1", "hang", json!({}))]);
+    let app = AgentCoreApp::new(agent(main.clone()))
+        .summarize_history(agent(summarizer.clone()), 1, 2)
+        .max_run_duration(Duration::from_millis(300));
+    let url = serve(app).await;
+
+    for prompt in ["first", "second"] {
+        assert_eq!(invoke(&url, "s", prompt, false).await.status(), 200);
+    }
+    // The session now holds four messages, past the trigger, so this
+    // invocation summarizes first, and the summary never returns.
+    let stopped = invoke(&url, "s", "third", false).await;
+    assert_eq!(stopped.status(), 504);
+    assert_eq!(summarizer.request_count(), 1, "the summary was attempted");
+    assert_eq!(
+        main.request_count(),
+        2,
+        "the stopped run never reached the model"
+    );
+}
