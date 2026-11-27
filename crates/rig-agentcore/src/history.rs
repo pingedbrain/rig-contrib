@@ -11,12 +11,17 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
-use rig_core::message::Message;
+use rig_agent::Agent;
+use rig_core::conversation::pairing::safe_start;
+use rig_core::message::{Message, UserContent};
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use rig_memory::recent::{Recent, view};
-use rig_memory::{AsyncStore, SessionError, load_async, save_async};
+use rig_memory::{
+    AsyncStore, SUMMARIZATION_SYSTEM_PROMPT, SessionError, SummaryState, apply_summary, load_async,
+    save_async, serialize_conversation,
+};
 use sha2::{Digest, Sha256};
 
 /// The longest session id whose own characters name its log. Longer or
@@ -44,6 +49,17 @@ pub(crate) trait HistoryStore: WasmCompatSend + WasmCompatSync + 'static {
         messages: Vec<Message>,
         window: &'a dyn Recent,
     ) -> WasmBoxedFuture<'a, Result<(), HistoryError>>;
+
+    /// Replace the messages `read` (the first of `session`, as the caller
+    /// loaded them) with one summary message. `None`, changing nothing, when
+    /// the session no longer starts with `read`. Otherwise the session's
+    /// messages after the change.
+    fn replace_head<'a>(
+        &'a self,
+        session: &'a str,
+        read: &'a [Arc<Message>],
+        summary: &'a SummaryState,
+    ) -> WasmBoxedFuture<'a, Result<Option<Vec<Arc<Message>>>, HistoryError>>;
 }
 
 /// Whether `session` can name its log as it is: 1 to 128 ASCII letters,
@@ -118,6 +134,33 @@ impl HistoryStore for InMemory {
         conversation.drain(..conversation.len() - kept);
         Box::pin(async { Ok(()) })
     }
+
+    fn replace_head<'a>(
+        &'a self,
+        session: &'a str,
+        read: &'a [Arc<Message>],
+        summary: &'a SummaryState,
+    ) -> WasmBoxedFuture<'a, Result<Option<Vec<Arc<Message>>>, HistoryError>> {
+        let mut bounded = self.lock();
+        let replaced = bounded
+            .by_session
+            .get_mut(session)
+            .and_then(|conversation| {
+                let same = conversation
+                    .get(..read.len())?
+                    .iter()
+                    .zip(read)
+                    .all(|(now, read)| Arc::ptr_eq(now, read));
+                if !same || read.is_empty() {
+                    return None;
+                }
+                let text = summary.message()?;
+                conversation.drain(..read.len());
+                conversation.insert(0, Arc::new(Message::user(text)));
+                Some(conversation.clone())
+            });
+        Box::pin(async { Ok(replaced) })
+    }
 }
 
 /// Sessions in a [`rig_memory`] store, one session log per session id.
@@ -178,6 +221,36 @@ where
             Err(format!("the log {log} changed under {SAVE_ATTEMPTS} saves").into())
         })
     }
+
+    fn replace_head<'a>(
+        &'a self,
+        session: &'a str,
+        read: &'a [Arc<Message>],
+        summary: &'a SummaryState,
+    ) -> WasmBoxedFuture<'a, Result<Option<Vec<Arc<Message>>>, HistoryError>> {
+        Box::pin(async move {
+            let log = Self::log(session);
+            let mut conversation = load_async(&self.0, &log).await?;
+            // The store's own messages, so rig-memory's splice (which needs the
+            // same messages it was given) can apply; a session that no longer
+            // starts with `read` is left alone.
+            let replaces: Vec<Arc<Message>> = {
+                let now = conversation.messages();
+                let same = now
+                    .get(..read.len())
+                    .is_some_and(|now| now.iter().zip(read).all(|(now, read)| **now == **read));
+                match now.get(..read.len()) {
+                    Some(head) if same && !read.is_empty() => head.to_vec(),
+                    _ => return Ok(None),
+                }
+            };
+            if apply_summary(&mut conversation, &replaces, summary).is_none() {
+                return Ok(None);
+            }
+            save_async(&self.0, &log, &mut conversation).await?;
+            Ok(Some(conversation.messages().to_vec()))
+        })
+    }
 }
 
 /// How long a save waits before its `attempt`-th retry: a few milliseconds,
@@ -191,6 +264,136 @@ fn backoff(attempt: u32) -> std::time::Duration {
             % 8,
     );
     std::time::Duration::from_millis(u64::from(attempt) * 2 + jitter)
+}
+
+/// The summarizing window of [`AgentCoreApp::summarize_history`](crate::AgentCoreApp::summarize_history).
+#[derive(Clone)]
+pub(crate) struct Summarizing {
+    pub(crate) summarizer: Agent,
+    pub(crate) keep_recent: usize,
+    pub(crate) trigger_messages: usize,
+}
+
+/// Why a session's history was not summarized. Only logged: the caller then
+/// sends the full history.
+#[derive(Debug, thiserror::Error)]
+enum SummarizeError {
+    #[error("the summarizer failed: {0}")]
+    Run(String),
+    #[error("the summarizer returned no text")]
+    Empty,
+    #[error("the summary could not be stored: {0}")]
+    Store(String),
+    #[error("the conversation changed while it was summarized")]
+    Changed,
+}
+
+/// A probe summary whose text marks where the summary text falls in its frame.
+const PROBE: &str = "\u{1}";
+
+/// The text every summary message opens with: rig-memory's frame, before the summary.
+static OPENING: LazyLock<String> = LazyLock::new(|| {
+    SummaryState {
+        summary: PROBE.to_owned(),
+        ..SummaryState::default()
+    }
+    .message()
+    .unwrap_or_default()
+    .split(PROBE)
+    .next()
+    .unwrap_or_default()
+    .to_owned()
+});
+
+/// Whether `message` is a summary this module wrote (or rig-memory's splice did).
+pub(crate) fn is_summary(message: &Message) -> bool {
+    let Message::User { content } = message else {
+        return false;
+    };
+    matches!(
+        content.first(),
+        Some(UserContent::Text(text)) if text.text.starts_with(OPENING.as_str())
+    )
+}
+
+/// What a session keeps when a summarizer is set: the window's messages, and
+/// at least the newest `floor` messages, so a summarizer that keeps failing
+/// cannot grow a session without bound.
+pub(crate) struct Retained<'a> {
+    pub(crate) window: &'a dyn Recent,
+    pub(crate) floor: usize,
+}
+
+impl Recent for Retained<'_> {
+    fn start(&self, messages: &[Arc<Message>]) -> usize {
+        self.window
+            .start(messages)
+            .min(messages.len().saturating_sub(self.floor))
+    }
+}
+
+/// The request text for a summary of `read`, the messages it replaces.
+fn summary_prompt(read: &[Arc<Message>]) -> String {
+    format!(
+        "{SUMMARIZATION_SYSTEM_PROMPT}\n\n<conversation>\n{}\n</conversation>\n\n\
+         Summarize the conversation above in plain prose and short lists: the user's goals, \
+         decisions made, facts and names later turns depend on, and tasks still open. If it \
+         begins with an earlier summary, carry its facts forward.",
+        serialize_conversation(read)
+    )
+}
+
+/// Replace the older part of `messages` (all but the newest `keep_recent`, cut
+/// so no tool result is separated from its call) with one summary in `store`,
+/// and return the session's messages after it. `None` when nothing is older
+/// than the newest messages or the summary failed; the failure is logged and
+/// the history is left as it was.
+pub(crate) async fn summarize(
+    store: &dyn HistoryStore,
+    summarizing: &Summarizing,
+    session: &str,
+    messages: &[Arc<Message>],
+) -> Option<Vec<Arc<Message>>> {
+    let cut = safe_start(
+        messages,
+        messages.len().saturating_sub(summarizing.keep_recent),
+    );
+    let read = messages.get(..cut).filter(|read| !read.is_empty())?;
+    match try_summarize(store, summarizing, session, read).await {
+        Ok(messages) => Some(messages),
+        Err(error) => {
+            tracing::warn!(error = %error, "could not summarize the conversation; keeping its full history");
+            None
+        }
+    }
+}
+
+async fn try_summarize(
+    store: &dyn HistoryStore,
+    summarizing: &Summarizing,
+    session: &str,
+    read: &[Arc<Message>],
+) -> Result<Vec<Arc<Message>>, SummarizeError> {
+    let response = summarizing
+        .summarizer
+        .prompt(summary_prompt(read))
+        .run()
+        .await
+        .map_err(|failure| SummarizeError::Run(failure.to_string()))?;
+    let text = response.output();
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(SummarizeError::Empty);
+    }
+    let state = SummaryState {
+        summary: text.to_owned(),
+        ..SummaryState::default()
+    };
+    store
+        .replace_head(session, read, &state)
+        .await
+        .map_err(|failure| SummarizeError::Store(failure.to_string()))?
+        .ok_or(SummarizeError::Changed)
 }
 
 /// A session id for a call that came without one (outside AgentCore).
