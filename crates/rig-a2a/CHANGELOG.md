@@ -4,6 +4,7 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Added `A2aServer::allowed_hosts`, an opt-in check on the `Host` header. A request, card included, whose host is not listed gets HTTP 403 before any agent work, which guards a local server without a bearer token against DNS rebinding. Unset, nothing changes.
 - Docs: the README and the rustdoc of `RemoteAgent::connect` and `RemoteAgent::stream` name the client caps: agent card 1 MiB, v0.3 `message/send` reply 16 MiB, and one v0.3 SSE event 16 MiB before its blank line. The image limit is 5 MiB (was "5 MB").
 
 ## 0.47.4 (2026-11-27)

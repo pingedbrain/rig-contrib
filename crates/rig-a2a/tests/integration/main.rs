@@ -3,6 +3,7 @@
 mod client;
 mod compat_auth;
 mod history;
+mod host;
 mod limits;
 mod max_turns;
 mod otel;

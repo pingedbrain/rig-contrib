@@ -170,6 +170,12 @@ Every task spends model tokens, so an exposed agent is bounded by default:
 | `max_run_duration` | 10 min | the run is stopped, the task fails |
 | `max_request_bytes` | 2 MiB | HTTP 413 |
 | `bearer_token` | none | HTTP 401 on every call (cards stay public) |
+| `allowed_hosts` | none | HTTP 403 when the `Host` header is not listed, cards included |
+
+A server with no bearer token answers any `Host` header. A web page on another site can use DNS
+rebinding to reach a local server this way, so set `allowed_hosts` to the names clients use
+(`localhost`, your public host name). An entry without a port matches any port; `host:port`
+matches only that port. Unset, the `Host` header is not checked.
 
 Finished tasks are a different case: the default store keeps them all, so memory grows with
 every task. Set `terminal_task_limit` to purge the oldest finished tasks. A purged task
