@@ -6,11 +6,12 @@ use anyhow::{Context, ensure};
 use rig_agent::{Agent, AgentBuilder};
 use rig_core::completion::ToolAnnotations;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
-use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
+use rig_core::tool::{Tool, ToolContext, ToolExecutionError, args_schema};
 use rig_mcp_server::McpServer;
 use rmcp::model::{CallToolRequestParams, ClientRequest, ProgressNotificationParam, Request};
 use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
+use schemars::JsonSchema;
 use serde_json::{Value, json};
 
 /// A plain Rig tool: adds two numbers, read-only.
@@ -164,6 +165,65 @@ async fn a_plain_tool_runs_without_a_model() -> anyhow::Result<()> {
         .call_tool(call("add", json!({"a": "x", "b": 1})))
         .await?;
     ensure!(failed.is_error == Some(true), "{failed:?}");
+    Ok(())
+}
+
+/// A typed Rig tool: its arguments are a struct, and its schema is derived
+/// from that struct.
+#[derive(serde::Deserialize, JsonSchema)]
+struct Lookup {
+    /// The city to look up.
+    city: String,
+    /// How many days ahead, if not today.
+    days: Option<u8>,
+}
+
+struct LookupWeather;
+
+impl Tool for LookupWeather {
+    const NAME: &'static str = "lookup_weather";
+    type Args = Lookup;
+    type Output = Value;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Look up the weather in a city.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        args_schema::<Lookup>()
+    }
+
+    async fn call(&self, _: &mut ToolContext, args: Lookup) -> Result<Value, Self::Error> {
+        Ok(json!({"city": args.city, "days": args.days}))
+    }
+}
+
+#[tokio::test]
+async fn a_typed_tool_lists_the_schema_of_its_arguments() -> anyhow::Result<()> {
+    let (client, _) = connect(McpServer::new("test").tool(LookupWeather)).await?;
+    let tools = client.list_all_tools().await?;
+    let [lookup] = tools.as_slice() else {
+        anyhow::bail!("one tool: {tools:?}");
+    };
+    ensure!(lookup.name.as_ref() == "lookup_weather", "{lookup:?}");
+    let schema = Value::Object(lookup.input_schema.as_ref().clone());
+    ensure!(
+        schema.get("required") == Some(&json!(["city"])),
+        "{schema:?}"
+    );
+    ensure!(
+        schema.pointer("/properties/city/type") == Some(&json!("string")),
+        "{schema:?}"
+    );
+    ensure!(
+        schema.pointer("/properties/days/type") == Some(&json!("integer")),
+        "{schema:?}"
+    );
+    ensure!(
+        schema.pointer("/properties/city/description") == Some(&json!("The city to look up.")),
+        "{schema:?}"
+    );
     Ok(())
 }
 

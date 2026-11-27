@@ -2,6 +2,12 @@
 
 Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- `examples/typed_tool`: a typed Rig tool (arguments derived from a struct, schema
+  generated with `args_schema`) served over stdio or Streamable HTTP, with a test that
+  checks the schema a client sees.
+
 ## 0.47.2 (2026-11-26)
 
 - docs.rs documents every feature, each item marked with the feature it needs.
