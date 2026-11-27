@@ -140,6 +140,12 @@ host name when deploying. With `bearer_token`, calls without the token get HTTP 
 claude mcp add my-agents -- /path/to/your/binary
 ```
 
+Over HTTP, with the token from `bearer_token`:
+
+```sh
+claude mcp add --transport http my-agents http://127.0.0.1:3000/mcp --header "Authorization: Bearer $MY_AGENTS_TOKEN"
+```
+
 ## Sessions and limits
 
 Agent sessions live in memory by default (at most 1000, oldest forgotten first), or in any
@@ -175,6 +181,12 @@ sends one, else the call's own `session_id`. Export the spans with `rig_otel::in
 ```toml
 rig-mcp-server = { version = "0.47", features = ["otel"] }
 ```
+
+## Content recording
+
+Prompts and replies go on the agent's spans only when it records content. It is off by
+default, as in Rig. Set it on the agent you pass in with
+`AgentBuilder::record_content_telemetry(true)`.
 
 ## Testing
 
