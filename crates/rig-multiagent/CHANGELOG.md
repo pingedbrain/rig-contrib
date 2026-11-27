@@ -4,6 +4,7 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Logs no longer print checkpoint or node error text. A failed node or checkpoint write logs a short `kind` only, because the text can carry provider output or prompt content. No public API or behavior changed.
 - Examples: `swarm_graph` live replies are capped at 4096 tokens, not 1024, because reasoning tokens count toward the cap. `RIG_MAX_TOKENS` overrides it. The scripted run keeps 1024.
 - Docs: doc aliases `node_timeout` on `SwarmBuilder::agent_timeout` and `agent_timeout` on `GraphBuilder::node_timeout`. The root README has a table of the settings across the crates. No names or behavior changed.
 - README snippets are compile-checked as doctests, so the examples cannot rot.

@@ -117,7 +117,15 @@ impl A2aExecutor {
                     .retries(2)
                     .await
                     .map_err(|error| {
-                        tracing::warn!(%error, "A2A typed task failed");
+                        let reason = match &error {
+                            StructuredOutputError::Prompt(prompt) => status_message(prompt),
+                            _ => "not a structured answer",
+                        };
+                        tracing::warn!(
+                            kind = "run_failed",
+                            reason = reason,
+                            "A2A typed task failed"
+                        );
                         match &error {
                             StructuredOutputError::Prompt(prompt) => {
                                 failure_message(prompt).into_owned()
@@ -292,8 +300,8 @@ fn run(
                 .iter()
                 .map(|message| (**message).clone())
                 .collect::<Vec<_>>(),
-            Err(error) => {
-                tracing::warn!(parent: &span, %error, "could not load the conversation");
+            Err(_) => {
+                tracing::warn!(parent: &span, kind = "store_error", "could not load the conversation");
                 end("failed");
                 yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message("The conversation could not be loaded."))));
                 return;
@@ -312,8 +320,8 @@ fn run(
                     yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message(reason))));
                 }
                 Ok(Ok((value, messages))) => {
-                    if let Err(error) = executor.history.append(&ids.context, messages).await {
-                        tracing::warn!(parent: &span, %error, "could not save the conversation");
+                    if executor.history.append(&ids.context, messages).await.is_err() {
+                        tracing::warn!(parent: &span, kind = "store_error", "could not save the conversation");
                     }
                     let mut data = Part::text("");
                     data.content = a2a::PartContent::Data(value);
@@ -349,8 +357,8 @@ fn run(
                 Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                     // The answer stands even if the history cannot be saved;
                     // the next turn then starts without this one.
-                    if let Err(error) = executor.history.append(&ids.context, response.messages.clone()).await {
-                        tracing::warn!(parent: &span, %error, "could not save the conversation");
+                    if executor.history.append(&ids.context, response.messages.clone()).await.is_err() {
+                        tracing::warn!(parent: &span, kind = "store_error", "could not save the conversation");
                     }
                     // The final answer replaces the streamed text, which can
                     // include retried turns and text written before tool calls.
@@ -361,7 +369,7 @@ fn run(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::warn!(parent: &span, %error, "A2A task failed");
+                    tracing::warn!(parent: &span, kind = "run_failed", reason = status_message(&error), "A2A task failed");
                     end("failed");
                     yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message(failure_message(&error).into_owned()))));
                     return;
