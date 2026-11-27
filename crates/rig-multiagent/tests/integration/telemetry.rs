@@ -109,6 +109,23 @@ async fn a_swarm_run_span_carries_its_totals_and_handoffs() {
             .iter()
             .any(|kv| kv.key.as_str() == "swarm.to" && kv.value.to_string() == "second")
     );
+    // The handoff message is prompt content: its length is recorded, the text is not.
+    assert_eq!(
+        handoff
+            .attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == "swarm.message_chars")
+            .map(|kv| kv.value.to_string())
+            .as_deref(),
+        Some("9")
+    );
+    assert!(
+        handoff
+            .attributes
+            .iter()
+            .all(|kv| !kv.value.to_string().contains("Finish it")),
+        "handoff text must not reach telemetry"
+    );
 }
 
 #[tokio::test]
