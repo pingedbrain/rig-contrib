@@ -20,7 +20,8 @@
 //!
 //! - prompts and replies go on the spans only with
 //!   [`AgentCoreApp::record_content`] (off by default, as in Rig). AgentCore
-//!   Evaluations needs them to judge a session.
+//!   Evaluations needs them to judge a session. The app's setting overrides
+//!   the agent's own `record_content_telemetry`, so set it on the app.
 //!
 //! ```no_run
 //! async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
@@ -267,6 +268,15 @@ impl AgentCoreApp {
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
     /// needs them to judge a session; they are off by default, as in Rig,
     /// because they put conversation content into your telemetry.
+    ///
+    /// This setting always overrides the agent's own
+    /// `AgentBuilder::record_content_telemetry`. The app passes its value to
+    /// every invocation, so the agent's setting is ignored when the agent is
+    /// served through `AgentCoreApp`. To record content, call
+    /// `.record_content(true)` on the app. The default here is `false`, so an
+    /// agent built with `record_content_telemetry(true)` still records nothing
+    /// unless the app sets it too. This is planned to change in 0.48 (PR #42),
+    /// so that an app setting left unset keeps the agent's.
     #[must_use]
     pub fn record_content(self, record: bool) -> Self {
         self.rebuild(|inner| inner.record_content = record)

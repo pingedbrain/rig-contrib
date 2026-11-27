@@ -117,8 +117,10 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
   ```
 - **Content:** `record_content(true)` records prompts and replies on the GenAI spans.
   AgentCore Evaluations needs them to judge a session. They are off by default, as in Rig.
-  The setting applies to every invocation and overrides `AgentBuilder::record_content_telemetry`
-  on the agent.
+  The setting applies to every invocation and always overrides `AgentBuilder::record_content_telemetry`
+  on the agent. The agent's setting is ignored when it is served through `AgentCoreApp`, so to
+  record content, call `.record_content(true)` on the app. This is planned to change in 0.48
+  (PR #42), so that an app setting left unset keeps the agent's.
 
 ## Verified on AWS
 
