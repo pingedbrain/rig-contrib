@@ -91,6 +91,8 @@ file part. `A2aServer::typed::<T>()` serves an agent whose callers want data: ev
 runs as `prompt_typed::<T>` and answers with one JSON data part, and the card declares
 `application/json` output and the JSON schema of `T`.
 
+An agent with tools needs `AgentBuilder::default_max_turns(n)` with `n >= 2`. Without it the run stops after its first model call, and the failed task says so.
+
 ```rust
 use rig_a2a::A2aServer;
 use rig_agent::Agent;

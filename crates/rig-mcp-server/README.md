@@ -64,6 +64,8 @@ While an agent writes, its text streams to the client as **progress notification
 (when the client asks for progress). When the client **cancels** a call, the agent run
 stops.
 
+An agent with tools needs `AgentBuilder::default_max_turns(n)` with `n >= 2`. Without it the run stops after its first model call, and the error says so.
+
 ## Resources and prompts
 
 Besides tools, a server can offer fixed **resources** (`resources/list` and

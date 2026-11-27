@@ -1,5 +1,6 @@
 //! A Rig agent as an A2A agent executor.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
@@ -118,10 +119,11 @@ impl A2aExecutor {
                     .map_err(|error| {
                         tracing::warn!(%error, "A2A typed task failed");
                         match &error {
-                            StructuredOutputError::Prompt(prompt) => failure_message(prompt),
-                            _ => "The agent could not produce a structured answer.",
+                            StructuredOutputError::Prompt(prompt) => {
+                                failure_message(prompt).into_owned()
+                            }
+                            _ => "The agent could not produce a structured answer.".to_owned(),
                         }
-                        .to_owned()
                     })?;
                 let value =
                     serde_json::to_value(&response.output).map_err(|error| error.to_string())?;
@@ -360,7 +362,7 @@ fn run(
                 Err(error) => {
                     tracing::warn!(parent: &span, %error, "A2A task failed");
                     end("failed");
-                    yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message(failure_message(&error)))));
+                    yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message(failure_message(&error).into_owned()))));
                     return;
                 }
             }
@@ -481,7 +483,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 ///
 /// A failure arrives as the provider's error from an awaited run, or as its
 /// report from a streamed one; both carry the status and whether to retry.
-fn failure_message(failure: &PromptError) -> &'static str {
+fn failure_message(failure: &PromptError) -> Cow<'static, str> {
+    if let PromptError::MaxTurns { max_turns, .. } = failure {
+        return Cow::Owned(if *max_turns <= 1 {
+            "The agent reached its turn limit (1); agents with tools usually need AgentBuilder::default_max_turns(n) with n >= 2.".to_owned()
+        } else {
+            format!(
+                "The agent reached its turn limit ({max_turns}); raise AgentBuilder::default_max_turns above {max_turns} if the task needs more steps."
+            )
+        });
+    }
+    Cow::Borrowed(status_message(failure))
+}
+
+fn status_message(failure: &PromptError) -> &'static str {
     let (status, retryable) = match failure {
         PromptError::Provider(provider) => (
             failure
@@ -495,9 +510,6 @@ fn failure_message(failure: &PromptError) -> &'static str {
                 .map(|status| status.as_u16())),
             report.retryable,
         ),
-        PromptError::MaxTurns { .. } => {
-            return "The agent used up its turns without finishing.";
-        }
         _ => (None, false),
     };
     match status {
