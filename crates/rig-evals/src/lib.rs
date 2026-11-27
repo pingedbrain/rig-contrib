@@ -68,6 +68,8 @@ pub use target::{
 #[cfg(feature = "multiagent")]
 pub use target::{NodeTarget, node_target};
 
-#[cfg(doctest)]
+// The README's AgentCore example needs the `agentcore` feature, so the
+// README is compile-checked only with it enabled (CI uses --all-features).
+#[cfg(all(doctest, feature = "agentcore"))]
 #[doc = include_str!("../README.md")]
 mod readme_doctests {}

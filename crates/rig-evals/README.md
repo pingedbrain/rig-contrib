@@ -94,20 +94,21 @@ answer against the transcript, the tool calls and the case's references; goal su
 every turn of a multi-turn case.
 
 ```rust,no_run
-# use rig_agent::Agent;
-# use rig_evals::{Dataset, Experiment, LlmJudge};
-# async fn run(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::error::Error>> {
-let report = Experiment::new("support-bot")
-    .dataset(Dataset::load("evals/support.jsonl")?)
-    .target(agent)
-    .evaluator(LlmJudge::helpfulness(judge.clone()))
-    .evaluator(LlmJudge::faithfulness(judge))
-    .threshold("faithfulness", 0.9)
-    .run()
-    .await?;
-# let _ = report;
-# Ok(())
-# }
+use rig_agent::Agent;
+use rig_evals::{Dataset, Experiment, LlmJudge};
+
+async fn run(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    let report = Experiment::new("support-bot")
+        .dataset(Dataset::load("evals/support.jsonl")?)
+        .target(agent)
+        .evaluator(LlmJudge::helpfulness(judge.clone()))
+        .evaluator(LlmJudge::faithfulness(judge))
+        .threshold("faithfulness", 0.9)
+        .run()
+        .await?;
+    println!("passed: {}", report.passed());
+    Ok(())
+}
 ```
 
 A failed target run still gets scored, and the built-ins fail it. An evaluator that
@@ -166,7 +167,7 @@ flow:
    that is an error makes an error score.
 
 The spans are downloaded once per session and shared by every AgentCore evaluator of the
-same `AgentCore`.
+same `AgentCore`. The example below needs the `agentcore` feature, so this README is compile-checked only when that feature is enabled.
 
 ```rust
 use rig_evals::{AgentCore, Dataset, Experiment, Markdown, evaluators};

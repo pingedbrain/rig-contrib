@@ -31,7 +31,8 @@ async fn converse(
 ) -> Result<String, Box<dyn std::error::Error>> {
     let span = tracing::info_span!("conversation");
     rig_otel::set_session(&span, session_id, None)?;
-    Ok(agent.prompt(message).into_future().instrument(span).await?.to_string())
+    let answer = async { agent.prompt(message).await }.instrument(span).await?;
+    Ok(answer.to_string())
 }
 
 // Calling another service: it continues this trace and session.

@@ -1,14 +1,12 @@
 # Changelog
 
-## Unreleased
-
-- Example `console`: the README flow with a scripted model, printing spans, or sending them to an OTLP endpoint if one is set.
-
 Versions follow Rig's: rig-otel 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
-- README snippets are compile-checked as doctests; `.instrument` now takes an async block.
+- README snippets are compile-checked as doctests; the conversation example awaits the
+  prompt inside an async block before `.instrument(span)`.
+- Example `console`: the README flow with a scripted model, printing spans, or sending them to an OTLP endpoint if one is set.
 
 ## 0.47.2 (2026-11-26)
 

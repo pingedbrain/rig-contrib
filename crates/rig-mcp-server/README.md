@@ -10,35 +10,42 @@ other direction: Rig agents *as* MCP tools.
 
 ```rust
 use rig_agent::Agent;
+use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
 use rig_mcp_server::{McpServer, ServeError};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Ticket { title: String, priority: String }
 
-# struct Calculate;
-# impl rig_core::tool::Tool for Calculate {
-#     const NAME: &'static str = "calculate";
-#     type Args = serde_json::Value;
-#     type Output = serde_json::Value;
-#     type Error = rig_core::tool::ToolExecutionError;
-#     fn description(&self) -> String { "Add two numbers".into() }
-#     fn parameters(&self) -> serde_json::Value {
-#         serde_json::json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}})
-#     }
-#     async fn call(&self, _: &mut rig_core::tool::ToolContext, args: serde_json::Value) -> Result<serde_json::Value, Self::Error> {
-#         let n = |key: &str| args.get(key).and_then(serde_json::Value::as_f64)
-#             .ok_or_else(|| rig_core::tool::ToolExecutionError::other("not a number"));
-#         Ok(serde_json::json!({"sum": n("a")? + n("b")?}))
-#     }
-# }
+/// Adds two numbers. A plain Rig tool: it runs without a model.
+struct Add;
+
+impl Tool for Add {
+    const NAME: &'static str = "add";
+    type Args = Value;
+    type Output = Value;
+    type Error = ToolExecutionError;
+
+    fn description(&self) -> String {
+        "Add two numbers".into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}})
+    }
+
+    async fn call(&self, _: &mut ToolContext, args: Value) -> Result<Value, Self::Error> {
+        Ok(json!({"sum": args["a"].as_f64().unwrap_or(0.0) + args["b"].as_f64().unwrap_or(0.0)}))
+    }
+}
 
 async fn serve(research_agent: Agent, triager: Agent) -> Result<(), ServeError> {
     McpServer::new("my-agents")
         .agent(research_agent)            // a Rig agent, as a tool
         .typed_agent::<Ticket>(triager)   // answers with structured content
-        .tool(Calculate)                  // a plain Rig tool, no model
+        .tool(Add)                        // a plain Rig tool, no model
         .serve_stdio()                    // for a client that launches this binary
         .await?;
     Ok(())

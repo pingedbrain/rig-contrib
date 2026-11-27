@@ -168,15 +168,14 @@ until you answer it, and time spent waiting does not count against the run's tim
 use futures::StreamExt;
 use rig_multiagent::{Graph, GraphEvent};
 
-# fn read_line() -> String { String::new() }
-
 async fn approve(graph: Graph) {
     let mut events = graph.stream("Ship the release");
     while let Some(event) = events.next().await {
         match event {
             GraphEvent::Question(question) => {
                 println!("{} asks: {}\n{}", question.from(), question.question(), question.context());
-                question.answer(read_line()); // dropping it unanswered fails the asker
+                let answer = String::new(); // from your UI
+                question.answer(answer); // dropping it unanswered fails the asker
             }
             GraphEvent::Finished(outcome) => { /* ... */ }
             _ => {}

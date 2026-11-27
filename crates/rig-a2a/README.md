@@ -14,25 +14,31 @@ A2A Rust SDK ([`a2a-lf`](https://github.com/a2aproject/a2a-rs)):
   `Status`, `Text` (append), `Rewrite` (replace) and finally `Done(Reply)`.
 
 ```rust
-use rig_a2a::{A2aServer, RemoteAgent};
-use rig_agent::{Agent, AgentBuilder};
+use rig_a2a::A2aServer;
+use rig_agent::Agent;
 
-async fn serve_and_call(
-    agent: Agent,
-    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
-    url: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Serve: an Axum router with the agent card and the A2A endpoints.
-    let _app: axum::Router = A2aServer::new(agent, url).into_router();
+const URL: &str = "http://127.0.0.1:3000";
 
-    // Call: a remote agent as a tool. Rig's default is one turn, so the first
-    // tool call would fail: allow the call and the answer.
-    let remote = RemoteAgent::connect("http://127.0.0.1:3000").await?;
-    let _caller = AgentBuilder::new(model)
-        .dynamic_tool(remote.into_tool()?)
-        .default_max_turns(4)
-        .build();
+/// Serve an agent over A2A: the agent card and the protocol endpoints.
+async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    let app = A2aServer::new(agent, URL).into_router();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+    axum::serve(listener, app).await?;
     Ok(())
+}
+```
+
+```rust
+use rig_a2a::RemoteAgent;
+use rig_agent::AgentBuilder;
+
+const URL: &str = "http://127.0.0.1:3000";
+
+/// Give a model a remote A2A agent as a tool. Rig's default is one turn, so the
+/// first tool call would fail: allow the call and the answer.
+async fn call_remote(builder: AgentBuilder) -> Result<rig_agent::Agent, Box<dyn std::error::Error>> {
+    let remote = RemoteAgent::connect(URL).await?;
+    Ok(builder.dynamic_tool(remote.into_tool()?).default_max_turns(4).build())
 }
 ```
 
