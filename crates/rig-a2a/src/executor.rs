@@ -485,9 +485,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// report from a streamed one; both carry the status and whether to retry.
 fn failure_message(failure: &PromptError) -> Cow<'static, str> {
     if let PromptError::MaxTurns { max_turns, .. } = failure {
-        return Cow::Owned(format!(
-            "The agent reached its turn limit ({max_turns}); agents with tools usually need AgentBuilder::default_max_turns(n) with n >= 2."
-        ));
+        return Cow::Owned(if *max_turns <= 1 {
+            "The agent reached its turn limit (1); agents with tools usually need AgentBuilder::default_max_turns(n) with n >= 2.".to_owned()
+        } else {
+            format!(
+                "The agent reached its turn limit ({max_turns}); raise AgentBuilder::default_max_turns above {max_turns} if the task needs more steps."
+            )
+        });
     }
     Cow::Borrowed(status_message(failure))
 }

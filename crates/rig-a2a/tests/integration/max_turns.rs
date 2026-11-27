@@ -90,3 +90,32 @@ async fn a_run_that_finishes_gets_no_turn_hint() -> anyhow::Result<()> {
     ensure!(!reply.text.contains("default_max_turns"), "{reply:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn a_budget_that_runs_out_says_to_raise_it() -> anyhow::Result<()> {
+    // The budget is set, but the model keeps calling the tool past it.
+    let model = MockCompletionModel::from_stream_turns((0..2).map(|attempt| {
+        vec![
+            MockStreamEvent::tool_call(format!("call-{attempt}"), "echo", serde_json::json!({})),
+            MockStreamEvent::final_response_with_default_usage(),
+        ]
+    }));
+    let agent = AgentBuilder::new(model)
+        .name("Helper")
+        .tool(Echo)
+        .default_max_turns(2)
+        .build();
+    let remote = RemoteAgent::connect(&serve(agent).await?).await?;
+
+    let reply = remote.send("keep going", None).await?;
+    ensure!(reply.state == Some(TaskState::Failed), "{reply:?}");
+    ensure!(
+        reply.text.contains("turn limit (2)")
+            && reply
+                .text
+                .contains("raise AgentBuilder::default_max_turns above 2"),
+        "the hint names the budget to raise: {}",
+        reply.text
+    );
+    Ok(())
+}
