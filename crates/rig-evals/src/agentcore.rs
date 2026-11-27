@@ -6,6 +6,7 @@
 //! arrive, and send them to the `Evaluate` API.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,7 @@ use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::{Value, json};
 
 use crate::evaluators::target_failed;
+use crate::target::turn_error;
 use crate::{Case, EvalError, Evaluator, Score, Target, TargetError, TargetOutput, Trial, Turn};
 
 #[cfg(test)]
@@ -100,6 +102,7 @@ impl AgentCore {
         session_id: &str,
         log_group: &str,
         since: SystemTime,
+        turns: usize,
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<Arc<Vec<Value>>, AgentCoreError> {
@@ -111,7 +114,7 @@ impl AgentCore {
         let spans = loop {
             let spans = self.query(session_id, log_group, since).await?;
             let last_chance = started.elapsed().saturating_add(poll_interval) > timeout;
-            if settled(previous, &spans) || (last_chance && has_invocation(&spans)) {
+            if settled(previous, &spans, turns) || (last_chance && has_invocation(&spans)) {
                 break spans;
             }
             if last_chance {
@@ -210,7 +213,7 @@ impl AgentCoreTarget {
     }
 
     /// Run every turn of `case` in one new session.
-    async fn converse(&self, case: &Case) -> Result<TargetOutput, AgentCoreError> {
+    async fn converse(&self, case: &Case) -> Result<TargetOutput, TargetError> {
         let log_group = runtime_log_group(
             &self.runtime_arn,
             self.qualifier.as_deref().unwrap_or("DEFAULT"),
@@ -221,27 +224,45 @@ impl AgentCoreTarget {
             .state()
             .log_groups
             .insert(session_id.clone(), log_group);
-        let mut transcript = Vec::new();
-        for input in case.prompts() {
-            let answer = self.invoke(&session_id, input).await?;
-            transcript.push(Turn::new(input, answer));
-        }
-        let output = transcript
-            .last()
-            .map(|turn| turn.output.clone())
-            .unwrap_or_default();
-        if case.turns.is_empty() {
-            transcript.clear();
-        }
-        Ok(TargetOutput::new(output)
-            .with_session_id(session_id)
-            .with_transcript(transcript))
+        run_turns(case, &session_id, |session, prompt| async move {
+            self.invoke(&session, &prompt).await
+        })
+        .await
     }
+}
+
+/// Send each turn of `case` to `invoke` in `session_id`, in order, and collect
+/// the answers. A turn that fails is a [`TurnFailed`](crate::TurnFailed) of a
+/// multi-turn case, with the turns before it.
+async fn run_turns<F, Fut>(
+    case: &Case,
+    session_id: &str,
+    mut invoke: F,
+) -> Result<TargetOutput, TargetError>
+where
+    F: FnMut(String, String) -> Fut,
+    Fut: Future<Output = Result<String, AgentCoreError>>,
+{
+    let multi = !case.turns.is_empty();
+    let mut output = TargetOutput::default().with_session_id(session_id);
+    for (number, input) in case.prompts().into_iter().enumerate() {
+        match invoke(session_id.to_owned(), input.to_owned()).await {
+            Ok(answer) => {
+                output.transcript.push(Turn::new(input, answer.clone()));
+                output.output = answer;
+            }
+            Err(error) => return Err(turn_error(multi, number + 1, output, error.into())),
+        }
+    }
+    if !multi {
+        output.transcript.clear();
+    }
+    Ok(output)
 }
 
 impl Target for AgentCoreTarget {
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
-        Box::pin(async move { Ok(self.converse(case).await?) })
+        Box::pin(async move { self.converse(case).await })
     }
 }
 
@@ -322,6 +343,7 @@ impl AgentCoreEvaluator {
                 session_id,
                 &log_group,
                 since,
+                case.prompts().len(),
                 self.ingestion_timeout,
                 self.poll_interval,
             )
@@ -485,13 +507,18 @@ fn is_invocation(span: &Value) -> bool {
 }
 
 fn has_invocation(spans: &[Value]) -> bool {
-    spans.iter().any(is_invocation)
+    invocations(spans) > 0
 }
 
-/// Whether the spans are all in: an invocation arrived, and the count stayed
-/// the same since the `previous` query.
-fn settled(previous: Option<usize>, spans: &[Value]) -> bool {
-    has_invocation(spans) && previous == Some(spans.len())
+/// How many agent invocations the spans hold.
+fn invocations(spans: &[Value]) -> usize {
+    spans.iter().filter(|span| is_invocation(span)).count()
+}
+
+/// Whether the spans are all in: one invocation per turn arrived, and the
+/// count stayed the same since the `previous` query.
+fn settled(previous: Option<usize>, spans: &[Value], turns: usize) -> bool {
+    invocations(spans) >= turns && previous == Some(spans.len())
 }
 
 /// The trace of the last agent invocation: the one an expected answer is

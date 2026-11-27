@@ -243,3 +243,55 @@ async fn a_judge_reads_every_turn_and_the_transcript() {
         assert!(sent.contains(part), "the prompt lacks {part:?}: {sent}");
     }
 }
+
+#[tokio::test]
+async fn a_turn_one_tool_call_is_in_the_history_of_turn_two() {
+    use rig_agent::test_utils::MockAddTool;
+    use serde_json::json;
+
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("call-1", "add", json!({"x": 2, "y": 3})),
+        MockTurn::text("It is 5."),
+        MockTurn::text("Yes, 5."),
+    ]);
+    let agent = AgentBuilder::new(model.clone())
+        .tool(MockAddTool)
+        .default_max_turns(3)
+        .build();
+    let case = Case::multi_turn("sum", ["What is 2 + 3?", "Are you sure?"]);
+    let output = Target::run(&agent, &case).await.expect("runs");
+
+    assert_eq!(output.tool_calls.len(), 1);
+    let turn_two = model
+        .requests()
+        .into_iter()
+        .nth(2)
+        .expect("turn two's request");
+    let history = serde_json::to_string(&turn_two.chat_history).expect("json");
+    // The call and its result, both with id call-1, are in the history.
+    assert!(history.matches("call-1").count() >= 2, "{history}");
+    assert!(history.contains("\"add\""), "{history}");
+}
+
+#[tokio::test]
+async fn a_failed_turn_is_named_and_the_trial_keeps_the_turns_before_it() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("Noted.").with_usage(tokens(10, 2)),
+        MockTurn::error("down"),
+    ]);
+    let agent = AgentBuilder::new(model).build();
+    let report = Experiment::new("failing")
+        .dataset(Dataset::new([Case::multi_turn("two", ["one", "two"])]))
+        .target(agent)
+        .evaluator(evaluators::no_error())
+        .run()
+        .await
+        .expect("the experiment runs");
+
+    let trial = &report.trials.first().expect("a trial").trial;
+    let error = trial.error.as_deref().expect("the trial failed");
+    assert!(error.starts_with("turn 2: "), "{error}");
+    assert_eq!(trial.transcript, [Turn::new("one", "Noted.")]);
+    assert_eq!(trial.usage.input_tokens, Some(10));
+    assert_eq!(trial.usage.output_tokens, Some(2));
+}

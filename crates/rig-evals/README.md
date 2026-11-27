@@ -49,6 +49,9 @@ answer; the judge sees it too.
  "What is my favourite city?"], "expected": "Lisbon"}
 ```
 
+A failed turn makes the trial fail with `turn <n>: ...` as its error. The trial keeps the
+turns that completed, their tool calls and usage; the evaluators see them as usual.
+
 A case sets `input` or `turns`, not both; a dataset without `turns` reads as before. In
 Rust, `Case::multi_turn(id, turns)` builds one. An agent target keeps the history itself, a
 multi-turn case starting with an empty history (not the agent's memory store). An

@@ -143,21 +143,27 @@ impl Target for Agent {
     /// Prompts the agent with the case's input, or with each of its turns in
     /// order on one conversation (the agent keeps the history between
     /// turns). The tool calls are the ones in the runs' transcripts; the
-    /// usage is the total over the turns.
+    /// usage is the total over the turns. A multi-turn case that fails part
+    /// way is a [`TurnFailed`] holding the turns that completed.
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
+            let multi = !case.turns.is_empty();
             // A multi-turn case carries its own history, starting empty, so
             // it does not pick up the agent's memory store; a single-turn
             // case runs as before.
             let mut history: Vec<Message> = Vec::new();
             let mut output = TargetOutput::default();
-            let mut transcript = Vec::new();
-            for input in case.prompts() {
+            for (number, input) in case.prompts().into_iter().enumerate() {
                 let mut run = self.prompt(input.to_owned());
-                if !case.turns.is_empty() {
+                if multi {
                     run = run.history(history.iter().cloned());
                 }
-                let response = run.run().await?;
+                let response = match run.run().await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        return Err(turn_error(multi, number + 1, output, error.into()));
+                    }
+                };
                 output.tool_calls.extend(
                     response
                         .messages
@@ -170,15 +176,68 @@ impl Target for Agent {
                 );
                 output.usage += response.usage;
                 let answer = response.output();
-                transcript.push(Turn::new(input, answer.clone()));
+                output.transcript.push(Turn::new(input, answer.clone()));
                 output.output = answer;
                 history.extend(response.messages);
             }
-            if case.turns.is_empty() {
-                transcript.clear();
+            if !multi {
+                output.transcript.clear();
             }
-            Ok(output.with_transcript(transcript))
+            Ok(output)
         })
+    }
+}
+
+/// A multi-turn run that failed at one of its turns. The error of the turn
+/// is prefixed `turn <n>:`; the completed turns, their tool calls and usage
+/// (and the session id, if any) are kept in [`partial`](Self::partial), and
+/// the experiment puts them in the failed trial.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct TurnFailed {
+    /// The turn that failed, from 1.
+    pub turn: usize,
+    /// What the run had before it failed.
+    pub partial: TargetOutput,
+    cause: TargetError,
+}
+
+impl TurnFailed {
+    /// Turn `turn` failed with `cause`, after the turns in `partial`.
+    pub(crate) fn new(turn: usize, partial: TargetOutput, cause: TargetError) -> Self {
+        Self {
+            turn,
+            partial,
+            cause,
+        }
+    }
+
+    /// The error of the turn.
+    pub fn cause(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+        self.cause.as_ref()
+    }
+}
+
+impl std::fmt::Display for TurnFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "turn {}: {}", self.turn, self.cause)
+    }
+}
+
+impl std::error::Error for TurnFailed {}
+
+/// The error of turn `turn` of a run, with what the run had before it. A
+/// single-turn run keeps its error as it is.
+pub(crate) fn turn_error(
+    multi: bool,
+    turn: usize,
+    partial: TargetOutput,
+    cause: TargetError,
+) -> TargetError {
+    if multi {
+        Box::new(TurnFailed::new(turn, partial, cause))
+    } else {
+        cause
     }
 }
 

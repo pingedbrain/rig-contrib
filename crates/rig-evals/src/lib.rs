@@ -62,6 +62,8 @@ pub use report::{
     EvaluatorSummary, LatencySummary, Report, ThresholdResult, Tokens, Trial, TrialResult,
 };
 pub use sink::{JsonFile, JunitFile, Markdown, Sink, SinkError};
-pub use target::{FnTarget, Target, TargetError, TargetOutput, ToolCall, Turn, target_fn};
+pub use target::{
+    FnTarget, Target, TargetError, TargetOutput, ToolCall, Turn, TurnFailed, target_fn,
+};
 #[cfg(feature = "multiagent")]
 pub use target::{NodeTarget, node_target};

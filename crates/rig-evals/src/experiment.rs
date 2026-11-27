@@ -7,7 +7,10 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use crate::evaluator::clamp;
-use crate::{Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult};
+use crate::{
+    Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult,
+    TurnFailed,
+};
 
 /// An evaluation: a target run on every case of a dataset, a number of
 /// times, each run scored by every evaluator; the report goes to the sinks.
@@ -219,7 +222,18 @@ impl Experiment {
                     trial.session_id = output.session_id;
                     trial.transcript = output.transcript;
                 }
-                Err(error) => trial.error = Some(error.to_string()),
+                Err(error) => {
+                    // A multi-turn run that failed part way keeps the turns
+                    // it completed.
+                    if let Some(failed) = error.downcast_ref::<TurnFailed>() {
+                        trial.output = failed.partial.output.clone();
+                        trial.tool_calls = failed.partial.tool_calls.clone();
+                        trial.usage = failed.partial.usage;
+                        trial.session_id = failed.partial.session_id.clone();
+                        trial.transcript = failed.partial.transcript.clone();
+                    }
+                    trial.error = Some(error.to_string());
+                }
             }
             let mut scores = Vec::with_capacity(self.evaluators.len());
             for evaluator in &self.evaluators {
