@@ -12,12 +12,12 @@ use serde_json::json;
 
 type Reply = std::pin::Pin<Box<dyn Future<Output = Result<String, NodeError>> + Send>>;
 
-/// Keeps two dispatchers registered for the whole binary. With only one,
-/// tracing-core computes a callsite's interest from the registering thread's
-/// own default, so another test's span-less first hit caches "never" for
-/// every thread, and a later scoped subscriber here silently misses it. With
-/// two registered, interest is computed from all of them, whichever thread
-/// registers the callsite.
+/// Pins a global default (`NoSubscriber`) once per test binary. The dispatch
+/// that `Telemetry::build` registers is live on the test thread before
+/// `set_default` runs, so with only that one registration tracing-core takes
+/// its single-dispatcher path, reads this thread's default (none), and caches
+/// "never" for the callsite. The second live registration turns that path off,
+/// and the global is never dropped, so it stays off for the rest of the binary.
 fn pin_global_default() {
     static PIN: std::sync::Once = std::sync::Once::new();
     PIN.call_once(|| {
