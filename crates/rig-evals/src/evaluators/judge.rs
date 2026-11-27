@@ -55,9 +55,18 @@ impl LlmJudge {
     /// What the judge is asked.
     fn prompt(&self, case: &Case, trial: &Trial) -> String {
         let mut prompt = format!(
-            "You grade the answer of an AI agent.\n\nRubric:\n{}\n\nInput:\n{}\n",
-            self.rubric, case.input
+            "You grade the answer of an AI agent.\n\nRubric:\n{}\n\n",
+            self.rubric
         );
+        let prompts = case.prompts();
+        if let [input] = prompts.as_slice() {
+            let _ = write!(prompt, "Input:\n{input}\n");
+        } else {
+            prompt.push_str("Input turns, sent in order on one conversation:\n");
+            for (number, input) in prompts.iter().enumerate() {
+                let _ = writeln!(prompt, "{}. {input}", number + 1);
+            }
+        }
         if let Some(expected) = &case.expected {
             let _ = write!(prompt, "\nExpected answer:\n{expected}\n");
         }
@@ -65,6 +74,12 @@ impl LlmJudge {
             prompt.push_str("\nThe answer must satisfy:\n");
             for assertion in &case.assertions {
                 let _ = writeln!(prompt, "- {assertion}");
+            }
+        }
+        if !trial.transcript.is_empty() {
+            prompt.push_str("\nTranscript:\n");
+            for turn in &trial.transcript {
+                let _ = write!(prompt, "User: {}\nAgent: {}\n", turn.input, turn.output);
             }
         }
         if !trial.tool_calls.is_empty() {

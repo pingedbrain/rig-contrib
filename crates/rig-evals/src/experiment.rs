@@ -7,7 +7,10 @@ use futures::StreamExt;
 use tracing::Instrument;
 
 use crate::evaluator::clamp;
-use crate::{Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult};
+use crate::{
+    Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult,
+    TurnFailed,
+};
 
 /// An evaluation: a target run on every case of a dataset, a number of
 /// times, each run scored by every evaluator; the report goes to the sinks.
@@ -146,6 +149,14 @@ impl Experiment {
         if self.dataset.cases.is_empty() {
             return Err(ExperimentError::EmptyDataset);
         }
+        if let Some(case) = self
+            .dataset
+            .cases
+            .iter()
+            .find(|case| !case.input.is_empty() && !case.turns.is_empty())
+        {
+            return Err(ExperimentError::InputAndTurns(case.id.clone()));
+        }
         if self.evaluators.is_empty() {
             return Err(ExperimentError::NoEvaluators);
         }
@@ -209,8 +220,20 @@ impl Experiment {
                     trial.tool_calls = output.tool_calls;
                     trial.usage = output.usage;
                     trial.session_id = output.session_id;
+                    trial.transcript = output.transcript;
                 }
-                Err(error) => trial.error = Some(error.to_string()),
+                Err(error) => {
+                    // A multi-turn run that failed part way keeps the turns
+                    // it completed.
+                    if let Some(failed) = error.downcast_ref::<TurnFailed>() {
+                        trial.output = failed.partial.output.clone();
+                        trial.tool_calls = failed.partial.tool_calls.clone();
+                        trial.usage = failed.partial.usage;
+                        trial.session_id = failed.partial.session_id.clone();
+                        trial.transcript = failed.partial.transcript.clone();
+                    }
+                    trial.error = Some(error.to_string());
+                }
             }
             let mut scores = Vec::with_capacity(self.evaluators.len());
             for evaluator in &self.evaluators {
@@ -263,6 +286,9 @@ pub enum ExperimentError {
     /// Two cases share an id.
     #[error("two cases have the id {0:?}")]
     DuplicateCase(String),
+    /// A case sets both `input` and `turns`; it sets one of them.
+    #[error("case {0:?} sets both input and turns; set one of them")]
+    InputAndTurns(String),
     /// Two evaluators share a name; rename one with `named`.
     #[error("two evaluators are named {0:?}; rename one with named()")]
     DuplicateEvaluator(String),

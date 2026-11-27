@@ -6,7 +6,7 @@ use std::time::Duration;
 use rig_core::completion::Usage;
 use serde::{Deserialize, Serialize};
 
-use crate::{Score, ToolCall};
+use crate::{Score, ToolCall, Turn};
 
 /// One run of the target on a case.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -32,6 +32,10 @@ pub struct Trial {
     /// runtime does): remote evaluators look up the run's traces by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Each turn of a multi-turn case and its answer, in order; empty for a
+    /// single-turn case. `output` is the answer to the last turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transcript: Vec<Turn>,
 }
 
 impl Trial {
@@ -47,6 +51,7 @@ impl Trial {
             latency: Duration::ZERO,
             error: None,
             session_id: None,
+            transcript: Vec::new(),
         }
     }
 }

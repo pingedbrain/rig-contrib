@@ -10,15 +10,23 @@ use serde_json::{Map, Value};
 /// run against: the expected answer, the expected tool calls, and
 /// assertions in plain language (for an LLM judge).
 ///
-/// The same three references as AWS Bedrock AgentCore's evaluation
-/// reference inputs and Strands Evals' cases.
+/// A case is single-turn (`input`) or multi-turn (`turns`): see
+/// [`Case::turns`]. The same three references as AWS Bedrock AgentCore's
+/// evaluation reference inputs and Strands Evals' cases.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "CaseWire")]
 #[non_exhaustive]
 pub struct Case {
     /// Names the case in reports; unique within a dataset.
     pub id: String,
-    /// The prompt the target gets.
+    /// The prompt the target gets. Empty for a multi-turn case, which sets
+    /// `turns` instead; a case sets one or the other.
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub input: String,
+    /// The user turns of a multi-turn case, sent in order on one
+    /// conversation. Empty for a single-turn case.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<String>,
     /// The expected answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
@@ -39,10 +47,51 @@ impl Case {
         Self {
             id: id.into(),
             input: input.into(),
+            turns: Vec::new(),
             expected: None,
             trajectory: None,
             assertions: Vec::new(),
             metadata: Map::new(),
+        }
+    }
+
+    /// A multi-turn case `id`: each of `turns` is a user message, sent in
+    /// order on one conversation, so a turn can refer to the answers before
+    /// it. The target answers the last turn; evaluators see the whole
+    /// transcript as well (see [`Trial::transcript`](crate::Trial::transcript)).
+    ///
+    /// ```
+    /// use rig_evals::Case;
+    /// let case = Case::multi_turn("trip", ["Plan a trip to Lisbon.", "Which month is best?"]);
+    /// assert_eq!(case.prompts().len(), 2);
+    /// ```
+    pub fn multi_turn<I, S>(id: impl Into<String>, turns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(id, "").turns(turns)
+    }
+
+    /// Make this a multi-turn case with `turns`, replacing `input`.
+    #[must_use]
+    pub fn turns<I, S>(mut self, turns: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.input.clear();
+        self.turns = turns.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// The user turns, in order: `turns` of a multi-turn case, else the one
+    /// `input`.
+    pub fn prompts(&self) -> Vec<&str> {
+        if self.turns.is_empty() {
+            vec![self.input.as_str()]
+        } else {
+            self.turns.iter().map(String::as_str).collect()
         }
     }
 
@@ -72,6 +121,48 @@ impl Case {
     pub fn metadata(mut self, key: impl Into<String>, value: impl Into<Value>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
+    }
+}
+
+/// The JSON form of a [`Case`]: a case has `input` or `turns`, not both.
+#[derive(Deserialize)]
+struct CaseWire {
+    id: String,
+    #[serde(default)]
+    input: Option<String>,
+    #[serde(default)]
+    turns: Vec<String>,
+    #[serde(default)]
+    expected: Option<String>,
+    #[serde(default)]
+    trajectory: Option<Vec<ExpectedCall>>,
+    #[serde(default)]
+    assertions: Vec<String>,
+    #[serde(default)]
+    metadata: Map<String, Value>,
+}
+
+impl TryFrom<CaseWire> for Case {
+    type Error = String;
+
+    fn try_from(wire: CaseWire) -> Result<Self, Self::Error> {
+        let input = match (wire.input, wire.turns.is_empty()) {
+            (Some(input), true) => input,
+            (None, false) => String::new(),
+            (Some(_), false) => {
+                return Err(format!("case {:?} sets both input and turns", wire.id));
+            }
+            (None, true) => return Err(format!("case {:?} sets neither input nor turns", wire.id)),
+        };
+        Ok(Self {
+            id: wire.id,
+            input,
+            turns: wire.turns,
+            expected: wire.expected,
+            trajectory: wire.trajectory,
+            assertions: wire.assertions,
+            metadata: wire.metadata,
+        })
     }
 }
 

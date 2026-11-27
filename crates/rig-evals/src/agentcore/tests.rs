@@ -3,7 +3,7 @@ use aws_sdk_cloudwatchlogs::types::ResultField;
 use serde_json::json;
 
 use super::*;
-use crate::ExpectedCall;
+use crate::{ExpectedCall, TurnFailed};
 
 const ARN: &str = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-VDrTj0Hfw9";
 
@@ -65,10 +65,69 @@ fn query_rows_become_the_json_messages() {
 #[test]
 fn spans_settle_once_an_invocation_arrived_and_the_count_held() {
     let spans = vec![json!({"name": "chat"}), json!({"name": "invoke_agent rig"})];
-    assert!(!settled(None, &spans));
-    assert!(!settled(Some(1), &spans));
-    assert!(settled(Some(2), &spans));
-    assert!(!settled(Some(1), &[json!({"name": "chat"})]));
+    assert!(!settled(None, &spans, 1));
+    assert!(!settled(Some(1), &spans, 1));
+    assert!(settled(Some(2), &spans, 1));
+    assert!(!settled(Some(1), &[json!({"name": "chat"})], 1));
+}
+
+#[test]
+fn a_multi_turn_run_settles_only_once_every_turn_has_its_invocation() {
+    let one = vec![json!({"name": "invoke_agent rig"})];
+    let two = vec![
+        json!({"name": "invoke_agent rig"}),
+        json!({"name": "invoke_agent rig"}),
+    ];
+    // Turn 2's span is still ingesting: the count is stable but short.
+    assert!(!settled(Some(1), &one, 2));
+    assert!(!settled(None, &two, 2));
+    assert!(settled(Some(2), &two, 2));
+}
+
+#[tokio::test]
+async fn a_multi_turn_case_runs_every_turn_in_one_session() {
+    let case = Case::multi_turn("chat", ["one", "two", "three"]);
+    let sessions = std::sync::Mutex::new(Vec::new());
+    let output = run_turns(&case, "rig-evals-session", |session, prompt| {
+        sessions.lock().expect("lock").push(session);
+        async move { Ok(format!("answer to {prompt}")) }
+    })
+    .await
+    .expect("runs");
+
+    let sessions = sessions.into_inner().expect("lock");
+    assert_eq!(sessions.len(), 3);
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session == "rig-evals-session")
+    );
+    assert_eq!(output.session_id.as_deref(), Some("rig-evals-session"));
+    assert_eq!(output.output, "answer to three");
+    assert_eq!(output.transcript.len(), 3);
+}
+
+#[tokio::test]
+async fn a_failed_turn_is_prefixed_and_keeps_the_turns_before_it() {
+    let case = Case::multi_turn("chat", ["one", "two", "three"]);
+    let error = run_turns(&case, "rig-evals-session", |_, prompt| async move {
+        if prompt == "two" {
+            Err(AgentCoreError::Reply("boom".to_owned()))
+        } else {
+            Ok("ok".to_owned())
+        }
+    })
+    .await
+    .expect_err("turn 2 fails");
+
+    assert!(error.to_string().starts_with("turn 2: "), "{error}");
+    let failed = error.downcast_ref::<TurnFailed>().expect("a turn failure");
+    assert_eq!(failed.turn, 2);
+    assert_eq!(failed.partial.transcript.len(), 1);
+    assert_eq!(
+        failed.partial.session_id.as_deref(),
+        Some("rig-evals-session")
+    );
 }
 
 #[test]
