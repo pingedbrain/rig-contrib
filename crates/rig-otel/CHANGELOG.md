@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.47.4 (2026-11-27)
 
 - `agent_span(name)`: the outer span of an agent run, named `invoke_agent <name>` with `gen_ai.operation.name` `invoke_agent` and `gen_ai.agent.name`. Rig adopts an enabled outer span as the run's span, so a bare `conversation` span exported no `invoke_agent` span. The README and the `console` example use it now, with `set_session`.
 - An `OTEL_EXPORTER_OTLP_ENDPOINT` (or traces or metrics endpoint) value that is not an `http` or `https` URL with a host is reported as a warning at setup, naming the variable and the value. Setup still succeeds, as before.
