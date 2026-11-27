@@ -181,7 +181,7 @@ impl McpServer {
                     .retries(2)
                     .await
                     .map_err(|error| {
-                        tracing::warn!(%error, "typed agent call failed");
+                        tracing::warn!(kind = "run_failed", "typed agent call failed");
                         match &error {
                             StructuredOutputError::Prompt(prompt) => {
                                 failure_message(prompt).into_owned()
@@ -676,8 +676,8 @@ impl Handler {
                 .iter()
                 .map(|message| (**message).clone())
                 .collect::<Vec<_>>(),
-            Err(failure) => {
-                tracing::warn!(parent: &span, %failure, "could not load the session");
+            Err(_) => {
+                tracing::warn!(parent: &span, kind = "store_error", "could not load the session");
                 return Ok(error("The session could not be loaded."));
             }
         };
@@ -748,7 +748,7 @@ impl Handler {
                 }
                 Ok(_) => {}
                 Err(failure) => {
-                    tracing::warn!(parent: &span, %failure, "agent call failed");
+                    tracing::warn!(parent: &span, kind = "run_failed", "agent call failed");
                     return Ok(error(&failure_message(&failure)));
                 }
             }
@@ -758,8 +758,15 @@ impl Handler {
     /// Add a finished run to its session. The answer stands if this fails;
     /// the next call then starts without this turn.
     async fn save(&self, session: &str, messages: Vec<Message>, span: &tracing::Span) {
-        if let Err(failure) = self.0.server.history.append(session, messages).await {
-            tracing::warn!(parent: span, %failure, "could not save the session");
+        if self
+            .0
+            .server
+            .history
+            .append(session, messages)
+            .await
+            .is_err()
+        {
+            tracing::warn!(parent: span, kind = "store_error", "could not save the session");
         }
     }
 }

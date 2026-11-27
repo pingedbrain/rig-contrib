@@ -311,8 +311,11 @@ impl AgentHook for Journal {
             checkpoints,
             run_id,
         } = &self.0.saving;
-        if let Err(error) = checkpoints.save(run_id, &entries).await {
-            tracing::warn!(%error, "could not record a tool result in the journal");
+        if checkpoints.save(run_id, &entries).await.is_err() {
+            tracing::warn!(
+                kind = "checkpoint",
+                "could not record a tool result in the journal"
+            );
         }
         OutcomeAction::proceed()
     }

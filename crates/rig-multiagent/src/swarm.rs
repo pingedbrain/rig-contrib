@@ -791,8 +791,11 @@ impl Swarm {
                         // next run_as then repeats the last turn.
                         let saved =
                             snapshot(&trail, &member.name, &message, Some(response.output()));
-                        if let Err(error) = checkpoints.save(id, &saved).await {
-                            tracing::warn!(%error, "could not mark the swarm run finished");
+                        if checkpoints.save(id, &saved).await.is_err() {
+                            tracing::warn!(
+                                kind = "checkpoint",
+                                "could not mark the swarm run finished"
+                            );
                         }
                     }
                     return Ok(SwarmRun {
