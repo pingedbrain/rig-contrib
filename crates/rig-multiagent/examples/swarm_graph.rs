@@ -50,9 +50,16 @@ enum Backend {
 impl Backend {
     fn from_env() -> Result<Self> {
         if let Ok(model) = std::env::var("RIG_MODEL")
-            && let Some(name) = model.strip_prefix("opencode-go/")
-            && !name.is_empty()
+            && !model.is_empty()
         {
+            // Only OpenCode Go is wired here; anything else must not fall
+            // through to OpenRouter.
+            let Some(name) = model
+                .strip_prefix("opencode-go/")
+                .filter(|name| !name.is_empty())
+            else {
+                return Err(format!("RIG_MODEL must be opencode-go/<model>, got {model:?}").into());
+            };
             let key = std::env::var("OPENCODE_GO_API_KEY")
                 .or_else(|_| std::env::var("OPENCODE_API_KEY"))?;
             return Ok(Self::Live {

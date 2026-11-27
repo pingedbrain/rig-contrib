@@ -42,7 +42,9 @@ pub const ASK_TOOL: &str = "ask_human";
 /// [`handoff_to_agent`](HANDOFF_TOOL), which ends its turn and starts the
 /// agent it named. Every agent run starts with a fresh conversation: the
 /// earlier agents' work reaches the next one as text in its prompt, not as
-/// messages it made itself.
+/// messages it made itself. The text and tool results of an agent that hands
+/// off are forwarded to the next agent, so secrets in tool output reach it
+/// too; the forwarded work is cut to a fixed budget, oldest first.
 ///
 /// Cloning is cheap; clones share the agents.
 #[derive(Clone)]
@@ -774,6 +776,7 @@ impl Swarm {
                     let work = turn.take_work();
                     if !work.is_empty() {
                         trail.work.push((handoff.from.clone(), work));
+                        trim_trail_work(&mut trail.work);
                     }
                     message = Some(handoff.message.clone());
                     if let Some(emit) = emit {
@@ -908,6 +911,59 @@ impl Node for Swarm {
     }
 }
 
+/// Longest text one entry of the work so far keeps, in bytes. A longer one is
+/// cut and marked.
+const WORK_LINE_BYTES: usize = 4 * 1024;
+
+/// Most text the work so far keeps across all agents, in bytes. The oldest
+/// goes first.
+const WORK_TOTAL_BYTES: usize = 32 * 1024;
+
+fn bounded_line(line: String) -> String {
+    if line.len() <= WORK_LINE_BYTES {
+        return line;
+    }
+    let mut end = WORK_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut cut = line;
+    cut.truncate(end);
+    cut.push_str(" [truncated]");
+    cut
+}
+
+/// Drops the oldest lines of one turn's work until it fits the total budget.
+fn trim_oldest(work: &mut Vec<String>) {
+    let mut total: usize = work.iter().map(String::len).sum();
+    while total > WORK_TOTAL_BYTES && !work.is_empty() {
+        total -= work.remove(0).len();
+    }
+}
+
+/// Drops the oldest lines of the run's work, across agents, until it fits the
+/// total budget. An agent left with no lines is dropped too.
+fn trim_trail_work(work: &mut Vec<(String, Vec<String>)>) {
+    let mut total: usize = work
+        .iter()
+        .flat_map(|(_, lines)| lines)
+        .map(String::len)
+        .sum();
+    while total > WORK_TOTAL_BYTES {
+        let Some((_, lines)) = work.first_mut() else {
+            break;
+        };
+        if lines.is_empty() {
+            work.remove(0);
+            continue;
+        }
+        total -= lines.remove(0).len();
+        if lines.is_empty() {
+            work.remove(0);
+        }
+    }
+}
+
 /// One agent's turn, as the handoff tool and hook see it.
 struct Turn {
     agent: String,
@@ -939,7 +995,13 @@ impl Turn {
 
     fn note(&self, lines: impl IntoIterator<Item = String>) {
         let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
-        work.extend(lines.into_iter().filter(|line| !line.trim().is_empty()));
+        work.extend(
+            lines
+                .into_iter()
+                .filter(|line| !line.trim().is_empty())
+                .map(bounded_line),
+        );
+        trim_oldest(&mut work);
     }
 
     fn take_work(&self) -> Vec<String> {
