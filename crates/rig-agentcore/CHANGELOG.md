@@ -4,6 +4,15 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- **Behavior change:** `/invocations` runs at most 32 invocations at once
+  (`DEFAULT_MAX_CONCURRENT_TASKS`, as rig-a2a and rig-mcp-server), and an invocation past
+  that gets 429 Too Many Requests before the agent runs. A run is stopped after 600 seconds
+  (`DEFAULT_MAX_RUN_DURATION`): it answers 504 Gateway Timeout, or an `{"error"}` event when
+  streaming, and its turn is not added to the session.
+- **Behavior change:** a `/invocations` body over 2 MB (`DEFAULT_MAX_REQUEST_BYTES`, the limit
+  already in place) gets 413 Payload Too Large with the JSON error, not 400.
+- `AgentCoreApp::max_concurrent_tasks`, `max_run_duration` and `max_request_bytes` set these
+  limits.
 - README snippets are compile-checked as doctests, so the examples cannot rot.
 - `AgentCoreApp::summarize_history(summarizer, keep_recent, trigger_messages)`: opt-in. Past
   `trigger_messages`, a session's older messages become one summary, its first message: a user

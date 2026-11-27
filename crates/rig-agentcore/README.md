@@ -75,6 +75,25 @@ async fn serve(agent: Agent) -> Result<(), Box<dyn std::error::Error>> {
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
   is what AgentCore Observability and AgentCore Evaluations read.
+- **Limits:** each invocation holds a slot while it runs; at most 32 run at once
+  (`max_concurrent_tasks`), and an invocation beyond that gets 429 before the agent
+  runs. A run stops after 600 seconds (`max_run_duration`): it answers 504, or an
+  `{"error"}` event when streaming, and its turn is not kept. A body over 2 MB
+  (`max_request_bytes`) gets 413.
+
+  ```rust
+  use std::time::Duration;
+
+  use rig_agent::Agent;
+  use rig_agentcore::AgentCoreApp;
+
+  fn limited(agent: Agent) -> AgentCoreApp {
+      AgentCoreApp::new(agent)
+          .max_concurrent_tasks(8)
+          .max_run_duration(Duration::from_secs(120))
+          .max_request_bytes(256 * 1024)
+  }
+  ```
 - **Content:** `record_content(true)` records prompts and replies on the GenAI spans.
   AgentCore Evaluations needs them to judge a session; they are off by default, as in
   Rig.
@@ -96,5 +115,5 @@ What made the spans evaluable: the scope `opentelemetry.instrumentation.rig`,
 ## Testing
 
 `cargo test` serves the contract over real HTTP for agents on scripted models: ping, a
-session keeping its conversation, sessions kept apart, streamed replies, a bad body, and
-an invocation continuing the caller's trace with the session on every span.
+session keeping its conversation, sessions kept apart, streamed replies, a bad body,
+the run and body limits, and an invocation continuing the caller's trace with the session on every span.
