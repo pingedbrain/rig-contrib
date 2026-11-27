@@ -58,3 +58,58 @@ fn sse_blocks_yield_their_data() {
     );
     assert_eq!(sse_data(b": keep-alive\n\n"), None);
 }
+
+#[test]
+fn sse_multi_line_data_joins_with_newlines() {
+    assert_eq!(
+        sse_data(b"data: {\"a\":\ndata:1}\n\n").as_deref(),
+        Some("{\"a\":\n1}")
+    );
+    // `data:` without a space after the colon is still data.
+    assert_eq!(sse_data(b"data:x\n\n").as_deref(), Some("x"));
+}
+
+#[test]
+fn sse_frames_split_across_chunks_are_joined() {
+    let mut framer = SseFramer::default();
+    assert!(framer.push(b"data: {\"a\"").unwrap().is_empty());
+    assert!(framer.push(b":1}\n").unwrap().is_empty());
+    // The blank line itself arrives in the next chunk.
+    assert_eq!(framer.push(b"\n").unwrap(), vec!["{\"a\":1}".to_owned()]);
+}
+
+#[test]
+fn sse_blank_line_split_across_chunks_ends_the_event() {
+    let mut framer = SseFramer::default();
+    assert!(framer.push(b"data: 1\n").unwrap().is_empty());
+    assert_eq!(
+        framer.push(b"\ndata: 2\n\n").unwrap(),
+        vec!["1".to_owned(), "2".to_owned()]
+    );
+}
+
+#[test]
+fn sse_crlf_framing_is_normalized() {
+    let mut framer = SseFramer::default();
+    let events = framer.push(b"data: one\r\n\r\ndata: two\r\n").unwrap();
+    assert_eq!(events, vec!["one".to_owned()]);
+    assert_eq!(framer.push(b"\r\n").unwrap(), vec!["two".to_owned()]);
+}
+
+#[test]
+fn sse_event_over_the_cap_is_an_error() {
+    let mut framer = SseFramer::default();
+    let chunk = vec![b'x'; 1024 * 1024];
+    for _ in 0..MAX_PENDING_EVENT_BYTES / chunk.len() {
+        assert!(framer.push(&chunk).unwrap().is_empty());
+    }
+    let err = framer.push(&chunk).unwrap_err();
+    assert_eq!(err.code, INVALID_PARAMS);
+    assert!(err.message.contains("longer than"));
+}
+
+#[test]
+fn out_of_range_error_codes_fall_back_to_internal_error() {
+    let error = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": 1i64 << 40, "message": "big"}});
+    assert_eq!(response_from_frame(&error).unwrap_err().code, -32603);
+}
