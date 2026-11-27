@@ -146,6 +146,14 @@ impl Experiment {
         if self.dataset.cases.is_empty() {
             return Err(ExperimentError::EmptyDataset);
         }
+        if let Some(case) = self
+            .dataset
+            .cases
+            .iter()
+            .find(|case| !case.input.is_empty() && !case.turns.is_empty())
+        {
+            return Err(ExperimentError::InputAndTurns(case.id.clone()));
+        }
         if self.evaluators.is_empty() {
             return Err(ExperimentError::NoEvaluators);
         }
@@ -209,6 +217,7 @@ impl Experiment {
                     trial.tool_calls = output.tool_calls;
                     trial.usage = output.usage;
                     trial.session_id = output.session_id;
+                    trial.transcript = output.transcript;
                 }
                 Err(error) => trial.error = Some(error.to_string()),
             }
@@ -263,6 +272,9 @@ pub enum ExperimentError {
     /// Two cases share an id.
     #[error("two cases have the id {0:?}")]
     DuplicateCase(String),
+    /// A case sets both `input` and `turns`; it sets one of them.
+    #[error("case {0:?} sets both input and turns; set one of them")]
+    InputAndTurns(String),
     /// Two evaluators share a name; rename one with `named`.
     #[error("two evaluators are named {0:?}; rename one with named()")]
     DuplicateEvaluator(String),

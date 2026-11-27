@@ -21,7 +21,7 @@ use rig_core::wasm_compat::WasmBoxedFuture;
 use serde_json::{Value, json};
 
 use crate::evaluators::target_failed;
-use crate::{Case, EvalError, Evaluator, Score, Target, TargetError, TargetOutput, Trial};
+use crate::{Case, EvalError, Evaluator, Score, Target, TargetError, TargetOutput, Trial, Turn};
 
 #[cfg(test)]
 mod tests;
@@ -171,8 +171,10 @@ impl AgentCore {
 /// A runtime on AgentCore Runtime; see [`AgentCore::target`].
 ///
 /// Each run invokes the runtime with `{"prompt": <input>}` in a new
-/// session and answers the reply's `response`. The trial carries the session
-/// id, which [`AgentCoreEvaluator`]s read the run's spans by.
+/// session and answers the reply's `response`. A multi-turn case sends each
+/// turn in that same session, in order, so the runtime keeps the history
+/// between turns. The trial carries the session id, which
+/// [`AgentCoreEvaluator`]s read the run's spans by.
 #[derive(Debug, Clone)]
 pub struct AgentCoreTarget {
     agentcore: AgentCore,
@@ -188,7 +190,27 @@ impl AgentCoreTarget {
         self
     }
 
-    async fn invoke(&self, prompt: &str) -> Result<TargetOutput, AgentCoreError> {
+    /// Invoke the runtime with `prompt` in `session_id`; the reply.
+    async fn invoke(&self, session_id: &str, prompt: &str) -> Result<String, AgentCoreError> {
+        let output = self
+            .agentcore
+            .runtime
+            .invoke_agent_runtime()
+            .agent_runtime_arn(&self.runtime_arn)
+            .set_qualifier(self.qualifier.clone())
+            .runtime_session_id(session_id)
+            .content_type("application/json")
+            .accept("application/json")
+            .payload(Blob::new(json!({ "prompt": prompt }).to_string()))
+            .send()
+            .await
+            .map_err(|error| AgentCoreError::Invoke(error.into()))?;
+        let body = output.response.collect().await?.into_bytes();
+        reply(&body)
+    }
+
+    /// Run every turn of `case` in one new session.
+    async fn converse(&self, case: &Case) -> Result<TargetOutput, AgentCoreError> {
         let log_group = runtime_log_group(
             &self.runtime_arn,
             self.qualifier.as_deref().unwrap_or("DEFAULT"),
@@ -199,27 +221,27 @@ impl AgentCoreTarget {
             .state()
             .log_groups
             .insert(session_id.clone(), log_group);
-        let output = self
-            .agentcore
-            .runtime
-            .invoke_agent_runtime()
-            .agent_runtime_arn(&self.runtime_arn)
-            .set_qualifier(self.qualifier.clone())
-            .runtime_session_id(&session_id)
-            .content_type("application/json")
-            .accept("application/json")
-            .payload(Blob::new(json!({ "prompt": prompt }).to_string()))
-            .send()
-            .await
-            .map_err(|error| AgentCoreError::Invoke(error.into()))?;
-        let body = output.response.collect().await?.into_bytes();
-        Ok(TargetOutput::new(reply(&body)?).with_session_id(session_id))
+        let mut transcript = Vec::new();
+        for input in case.prompts() {
+            let answer = self.invoke(&session_id, input).await?;
+            transcript.push(Turn::new(input, answer));
+        }
+        let output = transcript
+            .last()
+            .map(|turn| turn.output.clone())
+            .unwrap_or_default();
+        if case.turns.is_empty() {
+            transcript.clear();
+        }
+        Ok(TargetOutput::new(output)
+            .with_session_id(session_id)
+            .with_transcript(transcript))
     }
 }
 
 impl Target for AgentCoreTarget {
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
-        Box::pin(async move { Ok(self.invoke(&case.input).await?) })
+        Box::pin(async move { Ok(self.converse(case).await?) })
     }
 }
 

@@ -36,10 +36,31 @@ fields of Strands Evals' cases. `Dataset::load` reads `.json` (an array) or `.js
  "assertions": ["apologizes", "gives the refund amount"]}
 ```
 
+### Multi-turn cases
+
+A case with `turns` instead of `input` is a conversation: each turn is a user message,
+sent in order on one conversation, so a later turn can refer to earlier answers. The
+target answers the last turn, and the evaluators score that answer, the tool calls over
+all turns, and the usage over all turns. The trial's `transcript` holds each turn and its
+answer; the judge sees it too.
+
+```json
+{"id": "city", "turns": ["My favourite city is Lisbon.", "I like walking there.",
+ "What is my favourite city?"], "expected": "Lisbon"}
+```
+
+A case sets `input` or `turns`, not both; a dataset without `turns` reads as before. In
+Rust, `Case::multi_turn(id, turns)` builds one. An agent target keeps the history itself, a
+multi-turn case starting with an empty history (not the agent's memory store). An
+AgentCore target sends every turn in one runtime session. A `target_fn` gets the whole
+case: loop over `case.prompts()`, and return the last answer with `transcript` set. A
+`node_target` runs single-turn cases only.
+
 ## Targets
 
 A `Target` runs a case. Rig agents are targets: the trial gets the answer, the tool calls
-from the run's transcript, and the run's token usage. `target_fn` wraps an async
+from the run's transcript, and the run's token usage (summed over the turns of a
+multi-turn case). `target_fn` wraps an async
 function. With the `multiagent` feature, `node_target` wraps a rig-multiagent swarm,
 graph or node (answer and usage; nodes do not report tool calls).
 
@@ -101,7 +122,8 @@ flow:
 
 1. `AgentCoreTarget` invokes the runtime (`InvokeAgentRuntime`, HTTP protocol, payload
    `{"prompt": <input>}`) in a fresh session per trial and answers the reply's `response`.
-   The trial carries the session id.
+   A multi-turn case sends each turn in that one session, in order. The trial carries the
+   session id.
 2. `AgentCoreEvaluator` waits for the session's spans in CloudWatch Logs: it queries
    `aws/spans` and the runtime's `/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint>`
    group with Logs Insights every 10 seconds, up to 5 minutes, until an `invoke_agent`

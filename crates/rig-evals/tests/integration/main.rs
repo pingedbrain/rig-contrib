@@ -17,6 +17,7 @@ mod dataset;
 mod evaluators;
 mod experiment;
 mod judge;
+mod multi_turn;
 #[cfg(feature = "multiagent")]
 mod multiagent;
 mod output;

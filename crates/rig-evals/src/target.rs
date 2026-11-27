@@ -47,18 +47,40 @@ impl From<&rig_core::message::ToolCall> for ToolCall {
     }
 }
 
+/// One user turn of a multi-turn run and the answer it got.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Turn {
+    /// The user's message.
+    pub input: String,
+    /// The target's answer to it.
+    pub output: String,
+}
+
+impl Turn {
+    /// A turn of `input` answered by `output`.
+    pub fn new(input: impl Into<String>, output: impl Into<String>) -> Self {
+        Self {
+            input: input.into(),
+            output: output.into(),
+        }
+    }
+}
+
 /// What one target run produced.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
 pub struct TargetOutput {
-    /// The answer.
+    /// The answer: to the last turn of a multi-turn case.
     pub output: String,
-    /// The tool calls, in order.
+    /// The tool calls, in order, over all turns.
     pub tool_calls: Vec<ToolCall>,
-    /// The model tokens spent.
+    /// The model tokens spent, over all turns.
     pub usage: Usage,
     /// The session the run belongs to, for evaluators that read its traces.
     pub session_id: Option<String>,
+    /// Each turn and its answer, in order; empty for a single-turn run.
+    pub transcript: Vec<Turn>,
 }
 
 impl TargetOutput {
@@ -90,6 +112,13 @@ impl TargetOutput {
         self.session_id = Some(session_id.into());
         self
     }
+
+    /// Record the turns of a multi-turn run.
+    #[must_use]
+    pub fn with_transcript(mut self, transcript: Vec<Turn>) -> Self {
+        self.transcript = transcript;
+        self
+    }
 }
 
 impl From<String> for TargetOutput {
@@ -111,23 +140,44 @@ pub trait Target: WasmCompatSend + WasmCompatSync {
 }
 
 impl Target for Agent {
-    /// Prompts the agent with the case's input. The tool calls are the ones
-    /// in the run's transcript; the usage is the run's total.
+    /// Prompts the agent with the case's input, or with each of its turns in
+    /// order on one conversation (the agent keeps the history between
+    /// turns). The tool calls are the ones in the runs' transcripts; the
+    /// usage is the total over the turns.
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
-            let response = self.prompt(case.input.clone()).run().await?;
-            let tool_calls = response
-                .messages
-                .iter()
-                .filter_map(|message| match message {
-                    Message::Assistant(turn) => Some(turn),
-                    _ => None,
-                })
-                .flat_map(|turn| turn.tool_calls().map(ToolCall::from))
-                .collect();
-            Ok(TargetOutput::new(response.output())
-                .with_tool_calls(tool_calls)
-                .with_usage(response.usage))
+            // A multi-turn case carries its own history, starting empty, so
+            // it does not pick up the agent's memory store; a single-turn
+            // case runs as before.
+            let mut history: Vec<Message> = Vec::new();
+            let mut output = TargetOutput::default();
+            let mut transcript = Vec::new();
+            for input in case.prompts() {
+                let mut run = self.prompt(input.to_owned());
+                if !case.turns.is_empty() {
+                    run = run.history(history.iter().cloned());
+                }
+                let response = run.run().await?;
+                output.tool_calls.extend(
+                    response
+                        .messages
+                        .iter()
+                        .filter_map(|message| match message {
+                            Message::Assistant(turn) => Some(turn),
+                            _ => None,
+                        })
+                        .flat_map(|turn| turn.tool_calls().map(ToolCall::from)),
+                );
+                output.usage += response.usage;
+                let answer = response.output();
+                transcript.push(Turn::new(input, answer.clone()));
+                output.output = answer;
+                history.extend(response.messages);
+            }
+            if case.turns.is_empty() {
+                transcript.clear();
+            }
+            Ok(output.with_transcript(transcript))
         })
     }
 }
@@ -181,7 +231,14 @@ impl<N: rig_multiagent::Node> Target for NodeTarget<N> {
     fn run<'a>(&'a self, case: &'a Case) -> WasmBoxedFuture<'a, Result<TargetOutput, TargetError>> {
         Box::pin(async move {
             let io = rig_multiagent::NodeIo::quiet(&case.id);
-            let output = self.0.run(case.input.clone(), &io).await?;
+            let turns = case.prompts();
+            let [prompt] = turns.as_slice() else {
+                return Err(
+                    "a node target runs single-turn cases only; its nodes keep no conversation"
+                        .into(),
+                );
+            };
+            let output = self.0.run((*prompt).to_owned(), &io).await?;
             Ok(TargetOutput::new(output.text).with_usage(output.usage))
         })
     }
