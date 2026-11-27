@@ -97,7 +97,7 @@ fn a_bad_jsonl_line_is_named_with_the_path_and_line() {
     )
     .expect("write");
 
-    let error = Dataset::load(&path).expect_err("line 4 sets both input and turns");
+    let error = Dataset::load_named(&path).expect_err("line 4 sets both input and turns");
     let message = error.to_string();
     assert!(
         message.contains(&path.display().to_string()),
@@ -109,6 +109,12 @@ fn a_bad_jsonl_line_is_named_with_the_path_and_line() {
             if matches!(**source, DatasetError::Line { line: 4, .. })),
         "{error:?}"
     );
+
+    // load keeps its plain error: a bare Line, as before.
+    assert!(matches!(
+        Dataset::load(&path),
+        Err(DatasetError::Line { line: 4, .. })
+    ));
 }
 
 #[test]
@@ -121,7 +127,7 @@ fn a_bad_json_array_element_is_named_with_its_index_and_path() {
     )
     .expect("write");
 
-    let error = Dataset::load(&path).expect_err("element 1 has no input");
+    let error = Dataset::load_named(&path).expect_err("element 1 has no input");
     let message = error.to_string();
     assert!(
         message.contains(&path.display().to_string()),
@@ -129,12 +135,12 @@ fn a_bad_json_array_element_is_named_with_its_index_and_path() {
     );
     assert!(message.contains("index 1"), "no index 1 in {message:?}");
 
-    // Without a path, the index alone is named.
-    let error = Dataset::from_json(r#"[{"id": "a", "input": "1"}, 7]"#).expect_err("not a case");
-    assert!(
-        matches!(error, DatasetError::Element { index: 1, .. }),
-        "{error}"
-    );
+    // load and from_json keep their plain Json error, unchanged.
+    assert!(matches!(Dataset::load(&path), Err(DatasetError::Json(_))));
+    assert!(matches!(
+        Dataset::from_json(r#"[{"id": "a", "input": "1"}, 7]"#),
+        Err(DatasetError::Json(_))
+    ));
 }
 
 #[test]
@@ -143,7 +149,7 @@ fn a_malformed_json_file_names_the_path() {
     let path = dir.path().join("broken.json");
     std::fs::write(&path, "{\"id\": \"a\"}").expect("write");
 
-    let message = Dataset::load(&path)
+    let message = Dataset::load_named(&path)
         .expect_err("an object, not an array")
         .to_string();
     assert!(
