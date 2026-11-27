@@ -42,6 +42,9 @@ answers, and that answer is the swarm's, or calls `handoff_to_agent(agent_name, 
 context?)`. A handoff ends the agent's turn right there (a Rig hook stops the run), so it
 does not keep working on what the next agent now owns, nor spend tokens on it.
 
+The handoff tool's description asks the model to answer itself when it can, and not to
+hand back to the agent that just handed off unless it has new information.
+
 Every turn starts fresh; what one agent tells the next travels in the handoff message
 and the shared context, which every later agent sees. A handoff to an unknown agent, or
 to itself, is a tool error that names the valid agents, so the model can correct itself.
@@ -53,6 +56,11 @@ to itself, is a tool error that names the valid agents, so the model can correct
 | `agent_timeout` | 5 min | `SwarmFailure::Timeout` |
 | `execution_timeout` | 15 min | `SwarmFailure::Timeout` |
 | `detect_repetition(window, min_unique)` | off | `SwarmFailure::Repetitive`: the last `window` turns went to fewer than `min_unique` agents |
+
+`detect_repetition` is off by default because no window fits every team: a review loop
+between two agents can be intended. Turn it on for teams where bouncing is never the
+goal, for example `detect_repetition(4, 3)`: four turns that went to at most two agents
+stop the run early, and a forward chain of three distinct agents is not affected.
 
 A `SwarmRun` has the answer, the agent that gave it, every turn and handoff in order,
 the token usage of every model call (stopped turns included) and the elapsed time. A

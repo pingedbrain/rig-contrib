@@ -951,7 +951,9 @@ impl Tool for HandoffTool {
     fn description(&self) -> String {
         "Pass the work to another agent of the swarm, with a message saying what it should do \
          next and why, and optionally context to share with the agents after you. Your turn \
-         ends when you call this."
+         ends when you call this. Answer directly yourself when you can; hand off only work \
+         that another agent must do. Do not hand back to the agent that just handed the work \
+         to you unless you have new information for it."
             .into()
     }
 

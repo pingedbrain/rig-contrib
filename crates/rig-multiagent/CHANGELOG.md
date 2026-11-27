@@ -4,6 +4,13 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- `Swarm::detect_repetition` is documented and tested: two agents passing the work back
+  and forth fail with `SwarmFailure::Repetitive` once the last window of turns went to
+  fewer agents than the minimum. Still off by default; a run with no window is never
+  stopped for repetition, and a forward chain (A, B, C) is not stopped.
+- The handoff tool's description now asks the model to answer directly when it can, and
+  not to hand back to the agent that just handed off unless it has new information.
+  Prompt text only; the tool's name and parameters are unchanged.
 - `examples/swarm_graph.rs`: the Swarm, streaming and Graph snippets, on scripted models
   with no key; `OPENROUTER_MODEL` (with `OPENROUTER_API_KEY`) runs them live.
 - `Swarm::max_turns_per_agent(n)` and `Graph::max_turns_per_agent(n)`: the model calls one
