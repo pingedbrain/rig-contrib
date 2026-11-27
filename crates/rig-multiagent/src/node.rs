@@ -67,6 +67,7 @@ pub struct NodeIo<'a> {
     text: Option<EmitText<'a>>,
     question: Option<Emit<'a, Question>>,
     saving: Option<Saving>,
+    turns: Option<usize>,
 }
 
 impl<'a> NodeIo<'a> {
@@ -78,6 +79,7 @@ impl<'a> NodeIo<'a> {
             text: None,
             question: None,
             saving: None,
+            turns: None,
         }
     }
 
@@ -89,12 +91,25 @@ impl<'a> NodeIo<'a> {
             text: Some(text),
             question: Some(question),
             saving: None,
+            turns: None,
         }
     }
 
     pub(crate) fn saving_to(mut self, saving: Option<Saving>) -> Self {
         self.saving = saving;
         self
+    }
+
+    /// Give an agent node the turn budget its run should have; see
+    /// [`turn_budget`].
+    pub(crate) fn with_turns(mut self, turns: usize) -> Self {
+        self.turns = Some(turns);
+        self
+    }
+
+    /// The turn budget the node's agent run gets, when the graph sets one.
+    fn turns(&self) -> Option<usize> {
+        self.turns
     }
 
     /// The node's id.
@@ -154,6 +169,9 @@ impl Node for Agent {
             let meter = Meter::default();
             let key = io.saving().map(|saving| saving.run_id.clone());
             let mut runner = in_conversation(self.prompt(input), self, key);
+            if let Some(turns) = io.turns() {
+                runner = runner.max_turns(turn_budget(self, turns));
+            }
             runner = runner.add_hook(meter.clone());
             if let Some(saving) = io.saving() {
                 runner = runner.add_hook(Journal::open(saving.kind("journal")).await?);
@@ -199,6 +217,15 @@ where
         let future = (self.0)(input);
         Box::pin(async move { Ok(NodeOutput::new(future.await?)) })
     }
+}
+
+/// The turn budget for one run of `agent` under a swarm or graph that sets
+/// `configured` turns per agent: the larger of the two. A run needs a turn
+/// for each tool call whose result the model reads, so an agent's own
+/// `default_max_turns` is kept when it is higher, and raised to `configured`
+/// when it is lower (Rig's default of one turn included).
+pub(crate) fn turn_budget(agent: &Agent, configured: usize) -> usize {
+    agent.run_spec().effective_max_turns().max(configured)
 }
 
 /// Give one agent run its own prompt-cache key, `key` or a fresh one, unless

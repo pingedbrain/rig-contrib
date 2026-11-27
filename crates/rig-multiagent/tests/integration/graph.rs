@@ -7,6 +7,9 @@ use std::time::{Duration, Instant};
 use rig_agent::AgentBuilder;
 use rig_core::completion::Usage;
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
+use serde_json::json;
+
+use crate::swarm::Lookup;
 use rig_multiagent::{
     BuildError, FnNode, Graph, GraphFailure, GraphState, NodeError, Swarm, node_fn,
 };
@@ -41,6 +44,30 @@ fn tokens(input: u64, output: u64) -> Usage {
     usage.output_tokens = Some(output);
     usage.total_tokens = Some(input + output);
     usage
+}
+
+#[tokio::test]
+async fn an_agent_node_calls_a_tool_then_answers() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::tool_call("call-1", "lookup", json!({"topic": "export"})),
+        MockTurn::text("It has 3 columns."),
+    ]);
+    let research = AgentBuilder::new(model.clone())
+        .name("research")
+        .tool(Lookup)
+        .build();
+    let graph = Graph::builder()
+        .node("research", research)
+        .build()
+        .expect("the builder is valid");
+
+    let run = graph
+        .run("How many columns?")
+        .await
+        .expect("the run succeeds");
+
+    assert_eq!(run.answer(), "It has 3 columns.");
+    assert_eq!(model.requests().len(), 2);
 }
 
 #[tokio::test]

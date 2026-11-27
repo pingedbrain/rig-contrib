@@ -49,6 +49,7 @@ to itself, is a tool error that names the valid agents, so the model can correct
 | Limit | Default | Beyond it |
 |---|---|---|
 | `max_handoffs` | 20 | `SwarmFailure::MaxHandoffs` |
+| `max_turns_per_agent(n)` | 8 | `SwarmFailure::Agent`, whose source is `MaxTurns` |
 | `agent_timeout` | 5 min | `SwarmFailure::Timeout` |
 | `execution_timeout` | 15 min | `SwarmFailure::Timeout` |
 | `detect_repetition(window, min_unique)` | off | `SwarmFailure::Repetitive`: the last `window` turns went to fewer than `min_unique` agents |
@@ -58,11 +59,10 @@ the token usage of every model call (stopped turns included) and the elapsed tim
 `SwarmError` carries the same trail up to the failure.
 
 The swarm adds `handoff_to_agent` to each agent's tool set, which clones of the agent
-share. Give each agent a turn budget with `.default_max_turns(n)`, as in
-`examples/swarm_graph.rs`. A handoff that goes through ends the turn, so one turn would
-do for it, but a tool call whose result the agent must read first (a refused handoff, or
-any other tool) needs a second. Rig's default is one turn, and the swarm does not raise
-it, so such a call fails with `MaxTurns`.
+share. Each agent run may make `max_turns_per_agent(n)` model calls, eight by default.
+That covers a tool call whose result the agent must read first, such as a refused
+handoff, and the answer after it. An agent's own `.default_max_turns(n)` is kept when it
+is higher; a lower one, including Rig's default of one, is raised to the swarm's number.
 
 ## Graph
 
@@ -99,6 +99,7 @@ the run then returns a `GraphError` with every failure and everything the rest p
 |---|---|---|
 | `max_node_executions` | none (required with cycles) | `GraphFailure::MaxNodeExecutions` |
 | `node_timeout` | 5 min | `GraphFailure::NodeTimeout` |
+| `max_turns_per_agent(n)` | 8 | `GraphFailure::Node`, whose source is `MaxTurns` |
 | `execution_timeout` | 15 min | `GraphFailure::Timeout` |
 
 `GraphRun::answer()` is the output of the last node to finish (or of each node in the
