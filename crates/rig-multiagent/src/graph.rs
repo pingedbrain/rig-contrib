@@ -180,6 +180,7 @@ impl GraphBuilder {
     }
 
     /// How long one node may take. Defaults to 5 minutes.
+    #[doc(alias = "agent_timeout")]
     pub fn node_timeout(mut self, timeout: Duration) -> Self {
         self.node_timeout = timeout;
         self

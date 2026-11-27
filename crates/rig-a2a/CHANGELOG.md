@@ -4,6 +4,7 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Docs: doc alias `max_sessions` on `A2aServer::max_contexts` and `A2aExecutor::max_contexts`. The root README has a table of the settings across the crates. No names or behavior changed.
 - Examples `a2a_serve` and `a2a_echo_server` print one line on failure (`error: could not listen on
   localhost:3000: ...`, or the `PORT` value that is not a number) instead of Rust's `Debug` output.
 - Docs: the front page and README show calling a remote agent directly (`RemoteAgent::send`) and as a tool, and where content recording is set.
