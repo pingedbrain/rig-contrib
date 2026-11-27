@@ -103,6 +103,14 @@ impl SwarmBuilder {
     ///
     /// The swarm adds the [`handoff_to_agent`](HANDOFF_TOOL) tool to the
     /// agent's tool set, which clones of the agent share.
+    ///
+    /// Give the agent a turn budget with
+    /// [`default_max_turns`](rig_agent::AgentBuilder::default_max_turns). A
+    /// handoff that goes through ends the turn at once, so one turn is enough
+    /// for it; but a tool call whose result the agent must read first (a
+    /// refused handoff, or any other tool it has) needs a second turn. Rig's
+    /// default is one turn, and the swarm does not raise it, so such a call
+    /// fails with `MaxTurns`.
     pub fn agent(mut self, agent: Agent) -> Self {
         self.agents.push(agent);
         self

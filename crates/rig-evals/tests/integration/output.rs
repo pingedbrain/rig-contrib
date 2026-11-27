@@ -127,3 +127,76 @@ async fn file_sinks_write_into_new_directories() {
     assert_eq!(read("junit.xml"), report.to_junit());
     assert_eq!(read("summary.md"), report.to_markdown());
 }
+
+/// Two cases: the first has an expected answer (and matches it), the second
+/// does not, so `equals` is not applicable to it.
+async fn mixed() -> Report {
+    Experiment::new("mixed")
+        .dataset(vec![
+            Case::new("has", "say ok").expected("ok"),
+            Case::new("lacks", "say ok"),
+        ])
+        .target(target_fn(|_case: Case| async {
+            Ok::<_, TargetError>(TargetOutput::new("ok").with_usage(tokens(10, 2)))
+        }))
+        .evaluator(evaluators::equals().not_applicable_without_reference())
+        .evaluator(evaluators::no_error())
+        .run()
+        .await
+        .expect("runs")
+}
+
+#[tokio::test]
+async fn a_not_applicable_score_is_left_out_of_rates_and_shown_in_every_sink() {
+    let report = mixed().await;
+    assert!(report.passed(), "the one applicable run passes");
+    let summary = report
+        .summary
+        .iter()
+        .find(|summary| summary.evaluator == "equals")
+        .expect("equals");
+    assert_eq!((summary.count, summary.passed), (1, 1));
+    assert_eq!((summary.not_applicable, summary.pass_rate), (1, 1.0));
+
+    let json = report.to_json().expect("json");
+    assert!(json.contains(r#""not_applicable": true"#), "{json}");
+
+    let markdown = report.to_markdown();
+    assert!(
+        markdown.contains("| equals | 100% | 100% | 1.00 | 1/1 (1 N/A) | pass |"),
+        "{markdown}"
+    );
+
+    let xml = report.to_junit();
+    assert_well_formed(&xml);
+    assert!(xml.contains(r#"skipped="1""#), "{xml}");
+    assert!(
+        xml.contains(
+            r#"<skipped message="not applicable: equals: the case has no expected answer"/>"#
+        ),
+        "{xml}"
+    );
+    assert!(
+        xml.contains(r#"<testcase name="has" classname="mixed" time="#),
+        "{xml}"
+    );
+}
+
+#[tokio::test]
+async fn an_all_not_applicable_evaluator_is_na_and_its_threshold_passes() {
+    let report = Experiment::new("nothing")
+        .dataset(vec![Case::new("lacks", "say ok")])
+        .target(target_fn(|_case: Case| async {
+            Ok::<_, TargetError>(TargetOutput::new("ok"))
+        }))
+        .evaluator(evaluators::equals().not_applicable_without_reference())
+        .run()
+        .await
+        .expect("runs");
+    assert!(report.passed());
+    assert!(
+        report
+            .to_markdown()
+            .contains("| equals | N/A | 100% | N/A | 0/0 (1 N/A) | N/A |")
+    );
+}
