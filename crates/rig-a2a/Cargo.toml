@@ -48,6 +48,8 @@ opentelemetry_sdk = { version = "0.32", features = ["testing"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Doctests only: DirStore is behind rig-memory's fs feature.
+rig-memory = { version = "0.47", default-features = false, features = ["fs"] }
 
 [lints]
 workspace = true

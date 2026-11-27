@@ -8,29 +8,39 @@ Rig composes agents by making one agent a tool of another. This crate adds the t
 patterns where no single agent is in charge.
 
 ```rust
-use rig_multiagent::{Graph, GraphState, Swarm};
+use rig_agent::Agent;
+use rig_multiagent::{Graph, Swarm};
 
-// Agents that pass the work on: each gets a `handoff_to_agent` tool.
-let team = Swarm::builder()
-    .agent(explorer)       // named Rig agents; descriptions tell the others what each is for
-    .agent(writer)
-    .max_handoffs(6)
-    .build()?;
-let run = team.run("What does this project do?").await?;
-println!("{} answered: {}", run.agent, run.answer);
+async fn review(
+    explorer: Agent,
+    writer: Agent,
+    strengths: Agent,
+    risks: Agent,
+    report: Agent,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Agents that pass the work on: each gets a `handoff_to_agent` tool.
+    let team = Swarm::builder()
+        .agent(explorer.clone()) // named Rig agents; descriptions tell the others what each is for
+        .agent(writer)
+        .max_handoffs(6)
+        .build()?;
+    let run = team.run("What does this project do?").await?;
+    println!("{} answered: {}", run.agent, run.answer);
 
-// Steps with dependencies: strengths and risks run in parallel, report joins them.
-let review = Graph::builder()
-    .node("explore", explorer)
-    .node("strengths", strengths)
-    .node("risks", risks)
-    .node("report", report)
-    .edge("explore", "strengths")
-    .edge("explore", "risks")
-    .edge("strengths", "report")
-    .edge("risks", "report")
-    .build()?;
-println!("{}", review.run("Review src/tools.rs").await?.answer());
+    // Steps with dependencies: strengths and risks run in parallel, report joins them.
+    let review = Graph::builder()
+        .node("explore", explorer)
+        .node("strengths", strengths)
+        .node("risks", risks)
+        .node("report", report)
+        .edge("explore", "strengths")
+        .edge("explore", "risks")
+        .edge("strengths", "report")
+        .edge("risks", "report")
+        .build()?;
+    println!("{}", review.run("Review src/tools.rs").await?.answer());
+    Ok(())
+}
 ```
 
 ## Swarm
@@ -120,16 +130,18 @@ progress instead of waiting a minute for the answer:
 
 ```rust
 use futures::StreamExt;
-use rig_multiagent::SwarmEvent;
+use rig_multiagent::{Swarm, SwarmEvent};
 
-let mut events = team.stream("What does this project do?");
-while let Some(event) = events.next().await {
-    match event {
-        SwarmEvent::AgentStarted { agent } => println!("\n[{agent}]"),
-        SwarmEvent::Text { text, .. } => print!("{text}"),        // as the model writes it
-        SwarmEvent::Handoff(handoff) => println!("\n-> {}", handoff.to),
-        SwarmEvent::Finished(outcome) => println!("\n{:?}", (*outcome).map(|run| run.answer)),
-        _ => {}
+async fn watch(team: Swarm) {
+    let mut events = team.stream("What does this project do?");
+    while let Some(event) = events.next().await {
+        match event {
+            SwarmEvent::AgentStarted { agent } => println!("\n[{agent}]"),
+            SwarmEvent::Text { text, .. } => print!("{text}"),        // as the model writes it
+            SwarmEvent::Handoff(handoff) => println!("\n-> {}", handoff.to),
+            SwarmEvent::Finished(outcome) => println!("\n{:?}", (*outcome).map(|run| run.answer)),
+            _ => {}
+        }
     }
 }
 ```
@@ -153,15 +165,22 @@ fact. The question arrives as a `Question` event; the part of the run that asked
 until you answer it, and time spent waiting does not count against the run's timeouts.
 
 ```rust
-let mut events = graph.stream("Ship the release");
-while let Some(event) = events.next().await {
-    match event {
-        GraphEvent::Question(question) => {
-            println!("{} asks: {}\n{}", question.from(), question.question(), question.context());
-            question.answer(read_line()); // dropping it unanswered fails the asker
+use futures::StreamExt;
+use rig_multiagent::{Graph, GraphEvent};
+
+# fn read_line() -> String { String::new() }
+
+async fn approve(graph: Graph) {
+    let mut events = graph.stream("Ship the release");
+    while let Some(event) = events.next().await {
+        match event {
+            GraphEvent::Question(question) => {
+                println!("{} asks: {}\n{}", question.from(), question.question(), question.context());
+                question.answer(read_line()); // dropping it unanswered fails the asker
+            }
+            GraphEvent::Finished(outcome) => { /* ... */ }
+            _ => {}
         }
-        GraphEvent::Finished(outcome) => { /* ... */ }
-        _ => {}
     }
 }
 ```
@@ -172,14 +191,20 @@ while let Some(event) = events.next().await {
   work it needs:
 
   ```rust
-  let approved = |state: &GraphState| state.output("approve") == Some("yes");
-  Graph::builder()
-      .node("build", builder)
-      .node("approve", human("Deploy this release? (yes/no)"))
-      .node("deploy", deployer)
-      .edge("build", "approve")
-      .edge_if("approve", "deploy", approved)
-      .edge_if("build", "deploy", approved) // deploy also gets the build's output
+  use rig_agent::Agent;
+  use rig_multiagent::{Graph, GraphState, human};
+
+  fn gated(builder: Agent, deployer: Agent) -> Result<Graph, rig_multiagent::BuildError> {
+      let approved = |state: &GraphState| state.output("approve") == Some("yes");
+      Graph::builder()
+          .node("build", builder)
+          .node("approve", human("Deploy this release? (yes/no)"))
+          .node("deploy", deployer)
+          .edge("build", "approve")
+          .edge_if("approve", "deploy", approved)
+          .edge_if("build", "deploy", approved) // deploy also gets the build's output
+          .build()
+  }
   ```
 
 - **In a swarm**, `allow_questions()` gives every agent an `ask_human(question)` tool.
@@ -199,11 +224,16 @@ they go. Calling it again with the same `run_id`, in the same process or after a
 restart, resumes the run where it stopped, or starts it if it finished or never ran.
 
 ```rust
-let graph = Graph::builder()
-    .checkpoints(rig_memory::DirStore::open("runs")?) // or MemoryStore, rig-sqlite, rig-postgres...
-    // ...
-    .build()?;
-let run = graph.run_as("release-1.2", "Ship 1.2").await?;
+use rig_multiagent::Graph;
+
+async fn resume(graph_builder: rig_multiagent::GraphBuilder) -> Result<(), Box<dyn std::error::Error>> {
+    let graph = graph_builder
+        .checkpoints(rig_memory::DirStore::open("runs")?) // or MemoryStore, rig-sqlite, rig-postgres...
+        .build()?;
+    let run = graph.run_as("release-1.2", "Ship 1.2").await?;
+    println!("{}", run.answer());
+    Ok(())
+}
 ```
 
 - A swarm saves before every turn; a resumed run starts with the turn it was on,

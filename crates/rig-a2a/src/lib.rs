@@ -93,3 +93,7 @@ pub use rig_memory;
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+mod readme_doctests {}

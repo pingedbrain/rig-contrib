@@ -14,18 +14,26 @@ A2A Rust SDK ([`a2a-lf`](https://github.com/a2aproject/a2a-rs)):
   `Status`, `Text` (append), `Rewrite` (replace) and finally `Done(Reply)`.
 
 ```rust
-// Serve
-let app = rig_a2a::A2aServer::new(agent, "http://127.0.0.1:3000").into_router();
-let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
-rig_a2a::axum::serve(listener, app).await?;
+use rig_a2a::{A2aServer, RemoteAgent};
+use rig_agent::{Agent, AgentBuilder};
 
-// Call
-let remote = rig_a2a::RemoteAgent::connect("http://127.0.0.1:3000").await?;
-// Rig's default is one turn, so the first tool call would fail: allow the call and the answer.
-let agent = AgentBuilder::new(model)
-    .dynamic_tool(remote.into_tool()?)
-    .default_max_turns(4)
-    .build();
+async fn serve_and_call(
+    agent: Agent,
+    model: impl Into<rig_core::DynModel<rig_core::operation::Completion>>,
+    url: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Serve: an Axum router with the agent card and the A2A endpoints.
+    let _app: axum::Router = A2aServer::new(agent, url).into_router();
+
+    // Call: a remote agent as a tool. Rig's default is one turn, so the first
+    // tool call would fail: allow the call and the answer.
+    let remote = RemoteAgent::connect("http://127.0.0.1:3000").await?;
+    let _caller = AgentBuilder::new(model)
+        .dynamic_tool(remote.into_tool()?)
+        .default_max_turns(4)
+        .build();
+    Ok(())
+}
 ```
 
 Targets Rig 0.47. Native only (no wasm).
@@ -78,10 +86,20 @@ runs as `prompt_typed::<T>` and answers with one JSON data part, and the card de
 `application/json` output and the JSON schema of `T`.
 
 ```rust
+use rig_a2a::A2aServer;
+use rig_agent::Agent;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 struct Task { title: String, priority: Priority }
 
-A2aServer::new(extractor_agent, url).typed::<Task>().into_router();
+#[derive(Serialize, Deserialize, JsonSchema)]
+enum Priority { Low, High }
+
+fn extractor(extractor_agent: Agent, url: &str) -> axum::Router {
+    A2aServer::new(extractor_agent, url).typed::<Task>().into_router()
+}
 ```
 
 ## Conversations
@@ -96,9 +114,17 @@ result without its call. A `contextId` must be 1-128 of `[A-Za-z0-9_-]`, so a cl
 cannot make it escape a file store.
 
 ```rust
-A2aServer::new(agent, url)
-    .history_store(rig_memory::DirStore::new("./conversations"))
-    .history_window(rig_memory::recent::TokenBudget::new(16_000));
+use rig_a2a::A2aServer;
+use rig_agent::Agent;
+use rig_memory::{DirStore, recent::TokenBudget};
+
+fn conversations(agent: Agent, url: &str) -> Result<axum::Router, rig_memory::SessionError> {
+    let store = DirStore::open("./conversations")?;
+    Ok(A2aServer::new(agent, url)
+        .history_store(store)
+        .history_window(TokenBudget::new(16_000))
+        .into_router())
+}
 ```
 
 ## Production knobs
@@ -113,12 +139,24 @@ Every task spends model tokens, so an exposed agent is bounded by default:
 | `bearer_token` | none | HTTP 401 on every call (cards stay public) |
 
 ```rust
-A2aServer::new(agent, url)
-    .bearer_token(token)
-    .max_concurrent_tasks(8)
-    .max_run_duration(Duration::from_secs(120));
+use std::time::Duration;
+use rig_a2a::{A2aServer, RemoteAgent};
+use rig_agent::Agent;
 
-RemoteAgent::builder(url).bearer_token(token).timeout(Duration::from_secs(60)).connect().await?;
+async fn bounded(agent: Agent, url: &str, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _app = A2aServer::new(agent, url)
+        .bearer_token(token)
+        .max_concurrent_tasks(8)
+        .max_run_duration(Duration::from_secs(120))
+        .into_router();
+
+    let _remote = RemoteAgent::builder(url)
+        .bearer_token(token)
+        .timeout(Duration::from_secs(60))
+        .connect()
+        .await?;
+    Ok(())
+}
 ```
 
 ## Tracing

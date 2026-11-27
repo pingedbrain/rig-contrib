@@ -4,23 +4,26 @@ Evaluations for [Rig](https://github.com/0xPlaygrounds/rig) agents: run an agent
 dataset of cases, score every run, and fail CI when a pass rate drops.
 
 ```rust
-use rig_evals::{Dataset, Experiment, JunitFile, LlmJudge, Markdown, evaluators};
+use rig_agent::Agent;
 use rig_evals::evaluators::TrajectoryMode;
+use rig_evals::{Dataset, Experiment, JunitFile, LlmJudge, Markdown, evaluators};
 
-let report = Experiment::new("support-bot")
-    .dataset(Dataset::load("evals/support.jsonl")?)
-    .target(agent)
-    .evaluator(evaluators::trajectory(TrajectoryMode::InOrder))
-    .evaluator(evaluators::budget().max_total_tokens(4_000))
-    .evaluator(LlmJudge::new(judge, "Is the answer correct and polite?").threshold(0.7))
-    .repetitions(5)
-    .concurrency(4)
-    .threshold("llm_judge", 0.8)
-    .sink(JunitFile::new("target/evals/junit.xml"))
-    .sink(Markdown::stdout())
-    .run()
-    .await?;
-std::process::exit(if report.passed() { 0 } else { 1 });
+async fn support_bot(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::error::Error>> {
+    let report = Experiment::new("support-bot")
+        .dataset(Dataset::load("evals/support.jsonl")?)
+        .target(agent)
+        .evaluator(evaluators::trajectory(TrajectoryMode::InOrder))
+        .evaluator(evaluators::budget().max_total_tokens(4_000))
+        .evaluator(LlmJudge::new(judge, "Is the answer correct and polite?").threshold(0.7))
+        .repetitions(5)
+        .concurrency(4)
+        .threshold("llm_judge", 0.8)
+        .sink(JunitFile::new("target/evals/junit.xml"))
+        .sink(Markdown::stdout())
+        .run()
+        .await?;
+    std::process::exit(if report.passed() { 0 } else { 1 });
+}
 ```
 
 ## Cases
@@ -168,16 +171,19 @@ same `AgentCore`.
 ```rust
 use rig_evals::{AgentCore, Dataset, Experiment, Markdown, evaluators};
 
-let agentcore = AgentCore::from_env().await; // or AgentCore::new(&sdk_config)
-let report = Experiment::new("rig-lab")
-    .dataset(Dataset::load("evals/math.jsonl")?)
-    .target(agentcore.target("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-AbCdE12345"))
-    .evaluator(agentcore.evaluator("Builtin.Correctness").threshold(0.8))
-    .evaluator(agentcore.evaluator("Builtin.Helpfulness"))
-    .evaluator(evaluators::no_error())
-    .sink(Markdown::stdout())
-    .run()
-    .await?;
+async fn agentcore_eval() -> Result<(), Box<dyn std::error::Error>> {
+    let agentcore = AgentCore::from_env().await; // or AgentCore::new(&sdk_config)
+    let _report = Experiment::new("rig-lab")
+        .dataset(Dataset::load("evals/math.jsonl")?)
+        .target(agentcore.target("arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/rig_lab-AbCdE12345"))
+        .evaluator(agentcore.evaluator("Builtin.Correctness").threshold(0.8))
+        .evaluator(agentcore.evaluator("Builtin.Helpfulness"))
+        .evaluator(evaluators::no_error())
+        .sink(Markdown::stdout())
+        .run()
+        .await?;
+    Ok(())
+}
 ```
 
 The agent must leave spans AgentCore Evaluations can read: deploy it with

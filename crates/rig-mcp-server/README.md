@@ -9,14 +9,40 @@ Rig ships an MCP *client* (`rig-rmcp`, Rig agents using MCP tools). This crate i
 other direction: Rig agents *as* MCP tools.
 
 ```rust
-use rig_mcp_server::McpServer;
+use rig_agent::Agent;
+use rig_mcp_server::{McpServer, ServeError};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
-McpServer::new("my-agents")
-    .agent(research_agent)            // a Rig agent, as a tool
-    .typed_agent::<Ticket>(triager)   // answers with structured content
-    .tool(Calculate)                  // a plain Rig tool, no model
-    .serve_stdio()                    // for a client that launches this binary
-    .await?;
+#[derive(Serialize, Deserialize, JsonSchema)]
+struct Ticket { title: String, priority: String }
+
+# struct Calculate;
+# impl rig_core::tool::Tool for Calculate {
+#     const NAME: &'static str = "calculate";
+#     type Args = serde_json::Value;
+#     type Output = serde_json::Value;
+#     type Error = rig_core::tool::ToolExecutionError;
+#     fn description(&self) -> String { "Add two numbers".into() }
+#     fn parameters(&self) -> serde_json::Value {
+#         serde_json::json!({"type": "object", "properties": {"a": {"type": "number"}, "b": {"type": "number"}}})
+#     }
+#     async fn call(&self, _: &mut rig_core::tool::ToolContext, args: serde_json::Value) -> Result<serde_json::Value, Self::Error> {
+#         let n = |key: &str| args.get(key).and_then(serde_json::Value::as_f64)
+#             .ok_or_else(|| rig_core::tool::ToolExecutionError::other("not a number"));
+#         Ok(serde_json::json!({"sum": n("a")? + n("b")?}))
+#     }
+# }
+
+async fn serve(research_agent: Agent, triager: Agent) -> Result<(), ServeError> {
+    McpServer::new("my-agents")
+        .agent(research_agent)            // a Rig agent, as a tool
+        .typed_agent::<Ticket>(triager)   // answers with structured content
+        .tool(Calculate)                  // a plain Rig tool, no model
+        .serve_stdio()                    // for a client that launches this binary
+        .await?;
+    Ok(())
+}
 ```
 
 ## What a client sees
@@ -34,16 +60,29 @@ stops.
 ## Transports
 
 ```rust
+use rig_mcp_server::{McpServer, ServeError};
+
 // stdio: a local client launches the binary. Stdout carries the protocol,
 // so log to stderr only.
-server.serve_stdio().await?;
+async fn over_stdio(server: McpServer) -> Result<(), ServeError> {
+    server.serve_stdio().await
+}
 
 // Streamable HTTP at /mcp, as an Axum router.
-let app = server.bearer_token(token).into_router()?;
-axum::serve(listener, app).await?;
+async fn over_http(
+    server: McpServer,
+    token: &str,
+    listener: tokio::net::TcpListener,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let app = server.bearer_token(token).into_router()?;
+    axum::serve(listener, app).await?;
+    Ok(())
+}
 
-// Any rmcp transport (an in-memory duplex in tests, a socket...).
-server.serve(transport).await?;
+// Any rmcp transport, such as a reader and writer pair or a socket.
+async fn over_transport(server: McpServer) -> Result<(), ServeError> {
+    server.serve((tokio::io::stdin(), tokio::io::stdout())).await
+}
 ```
 
 Over HTTP the endpoint answers only to `localhost`, `127.0.0.1` and `::1` by default,
