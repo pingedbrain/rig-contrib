@@ -1,12 +1,13 @@
 //! Running a target on a dataset and scoring every run.
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 use tracing::Instrument;
 
 use crate::evaluator::clamp;
+use crate::target::{TRIAL_DEADLINE, deadline_in, timeout_message};
 use crate::{
     Case, Dataset, Evaluator, Report, Score, Sink, SinkError, Target, Trial, TrialResult,
     TurnFailed,
@@ -31,6 +32,7 @@ pub struct Experiment {
     concurrency: usize,
     thresholds: Vec<(String, f64)>,
     sinks: Vec<Box<dyn Sink>>,
+    trial_timeout: Option<Duration>,
 }
 
 impl Experiment {
@@ -45,6 +47,7 @@ impl Experiment {
             concurrency: 4,
             thresholds: Vec::new(),
             sinks: Vec::new(),
+            trial_timeout: None,
         }
     }
 
@@ -96,6 +99,26 @@ impl Experiment {
     #[must_use]
     pub fn sink(mut self, sink: impl Sink + 'static) -> Self {
         self.sinks.push(Box::new(sink));
+        self
+    }
+
+    /// Give each target run and each evaluator call at most `limit`. One
+    /// that takes longer fails and the other trials carry on: a target that
+    /// times out makes a trial with the error `timed out after <n>s`, which
+    /// the built-in evaluators fail; an evaluator that times out gives a
+    /// failed score labelled `error`. An agent target keeps the turns it
+    /// completed, as a failed turn does.
+    ///
+    /// The limit is per trial, not per run, and per call: a trial with `n`
+    /// evaluators can take up to `n + 1` times `limit`. The turns of one
+    /// multi-turn case share the one limit (a five-turn case gets one limit
+    /// in all, not five). A timed-out judge's token usage is dropped, so the
+    /// report's judge tokens undercount. A limit too large for the clock
+    /// (such as `Duration::MAX`) is no limit. Needs a running tokio runtime,
+    /// since the limit is a `tokio::time` timer. Off unless set.
+    #[must_use]
+    pub fn trial_timeout(mut self, limit: Duration) -> Self {
+        self.trial_timeout = Some(limit);
         self
     }
 
@@ -211,7 +234,14 @@ impl Experiment {
         );
         async move {
             let started = Instant::now();
-            let ran = target.run(case).await;
+            let deadline = self.trial_timeout.and_then(deadline_in);
+            let run = TRIAL_DEADLINE.scope(deadline, target.run(case));
+            let ran = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline.at, run)
+                    .await
+                    .unwrap_or_else(|_| Err(timeout_message(deadline.limit).into())),
+                None => run.await,
+            };
             let mut trial = Trial::new(case.id.clone(), repetition, "");
             trial.latency = started.elapsed();
             match ran {
@@ -238,12 +268,22 @@ impl Experiment {
             let mut scores = Vec::with_capacity(self.evaluators.len());
             for evaluator in &self.evaluators {
                 let name = evaluator.name();
-                let mut score = evaluator
-                    .evaluate(case, &trial)
-                    .await
-                    .unwrap_or_else(|error| {
-                        Score::fail(name, error.to_string()).with_label("error")
-                    });
+                let failed =
+                    |explanation: String| Score::fail(name, explanation).with_label("error");
+                let mut score = match self.trial_timeout.and_then(deadline_in) {
+                    Some(deadline) => {
+                        match tokio::time::timeout_at(deadline.at, evaluator.evaluate(case, &trial))
+                            .await
+                        {
+                            Ok(result) => result.unwrap_or_else(|error| failed(error.to_string())),
+                            Err(_) => failed(timeout_message(deadline.limit)),
+                        }
+                    }
+                    None => evaluator
+                        .evaluate(case, &trial)
+                        .await
+                        .unwrap_or_else(|error| failed(error.to_string())),
+                };
                 score.evaluator = name.to_owned();
                 score.value = clamp(score.value);
                 let label =
