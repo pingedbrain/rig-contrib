@@ -175,8 +175,9 @@ export IMAGE=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
    }
    ```
 
-   Save this permissions policy as `execution.json`. It covers pulling the image and writing
-   logs. Add `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` for your model
+   Save this permissions policy as `execution.json`. It covers pulling the image, writing logs,
+   and sending traces and metrics (the statements AWS lists for the runtime execution role).
+   Add `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` for your model
    only if your agent calls Bedrock:
 
    ```json
@@ -188,8 +189,16 @@ export IMAGE=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
        {"Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*"},
        {"Effect": "Allow", "Action": ["logs:CreateLogGroup", "logs:DescribeLogStreams"],
         "Resource": "arn:aws:logs:<region>:<account>:log-group:/aws/bedrock-agentcore/runtimes/*"},
+       {"Effect": "Allow", "Action": "logs:DescribeLogGroups",
+        "Resource": "arn:aws:logs:<region>:<account>:log-group:*"},
        {"Effect": "Allow", "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
-        "Resource": "arn:aws:logs:<region>:<account>:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"}
+        "Resource": "arn:aws:logs:<region>:<account>:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*"},
+       {"Effect": "Allow",
+        "Action": ["xray:PutTraceSegments", "xray:PutTelemetryRecords",
+                   "xray:GetSamplingRules", "xray:GetSamplingTargets"],
+        "Resource": "*"},
+       {"Effect": "Allow", "Action": "cloudwatch:PutMetricData", "Resource": "*",
+        "Condition": {"StringEquals": {"cloudwatch:namespace": "bedrock-agentcore"}}}
      ]
    }
    ```
@@ -230,13 +239,18 @@ export IMAGE=$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com/$REPO:latest
 5. Invoke the runtime. The session id must be at least 33 characters, and `uuidgen` gives 36.
    The output goes to `out.json`:
 
+   Save the request body as `payload.json`:
+
+   ```sh
+   echo '{"prompt":"Hi, I am Ana."}' > payload.json
+   ```
+
    ```sh
    aws bedrock-agentcore invoke-agent-runtime \
      --agent-runtime-arn <agent-runtime-arn> \
      --runtime-session-id "$(uuidgen)" \
      --content-type application/json --accept application/json \
-     --cli-binary-format raw-in-base64-out \
-     --payload '{"prompt":"Hi, I am Ana."}' \
+     --payload fileb://payload.json \
      --region $AWS_REGION out.json
    cat out.json
    ```
