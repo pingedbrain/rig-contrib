@@ -4,6 +4,7 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Examples: `serve` exports traces over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so its spans can be seen locally. Unset, it sets up no telemetry, as before. The example takes rig-otel's `otlp` feature as a dev-dependency; the library is unchanged.
 - Docs: the step-6 observability steps in the README serve the app as `AgentCoreApp::new(agent).record_content(true)`, since the app's setting overrides the agent's. The body limit is 2 MiB (was "2 MB").
 
 - Docs: `AgentCoreApp::record_content` always overrides the agent's `record_content_telemetry`, so the agent's setting is ignored when served through the app. To record prompt and answer content, call `.record_content(true)` on the app. This is planned to change in 0.48 (PR #42), so that an unset app setting keeps the agent's.

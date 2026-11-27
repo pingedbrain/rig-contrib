@@ -252,11 +252,29 @@ async fn run(backend: Backend) -> Result<Report> {
     }
 }
 
+/// Whether every trial errored (the target failed, or the judge failed on it),
+/// rather than getting a verdict. A rate limit (429) looks like this.
+fn all_trials_errored(report: &Report) -> bool {
+    !report.trials.is_empty()
+        && report.trials.iter().all(|result| {
+            result.trial.error.is_some()
+                || result
+                    .scores
+                    .iter()
+                    .any(|score| score.label.as_deref() == Some("error"))
+        })
+}
+
 #[tokio::main]
 async fn main() -> Result {
     let report = run(Backend::from_env()?).await?;
     eprintln!("JUnit written to {JUNIT}");
     if !report.passed() {
+        if all_trials_errored(&report) {
+            eprintln!(
+                "hint: every trial errored, so the provider may be rate-limiting (429); wait and run again, or lower Experiment::concurrency"
+            );
+        }
         std::process::exit(1);
     }
     Ok(())
