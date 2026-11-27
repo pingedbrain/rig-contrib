@@ -763,11 +763,12 @@ impl Swarm {
                         let limit = inner.max_handoffs;
                         return Err(trail.fail(SwarmFailure::MaxHandoffs { limit }));
                     }
-                    // A span event of the run: where the work went, and why.
+                    // A span event of the run: where the work went. The message is
+                    // prompt content, so only its length goes to telemetry.
                     tracing::info!(
                         swarm.from = %handoff.from,
                         swarm.to = %handoff.to,
-                        swarm.message = %handoff.message,
+                        swarm.message_chars = handoff.message.chars().count(),
                         "swarm.handoff"
                     );
                     current = next;
