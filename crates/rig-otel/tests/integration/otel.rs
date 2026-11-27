@@ -294,3 +294,199 @@ async fn a_session_keeps_the_rest_of_the_callers_baggage() {
         "{baggage}"
     );
 }
+
+/// A tool that always fails, to script a call that errors.
+struct Fail;
+
+impl Tool for Fail {
+    const NAME: &'static str = "fail";
+    type Args = Json;
+    type Output = String;
+    type Error = std::io::Error;
+
+    fn description(&self) -> String {
+        "Always fails.".into()
+    }
+
+    fn parameters(&self) -> Json {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn call(&self, _context: &mut ToolContext, _args: Json) -> Result<String, Self::Error> {
+        Err(std::io::Error::other("disk full"))
+    }
+}
+
+/// One metric data point: its name, unit, attributes, and its value (the
+/// count for a histogram, the sum for a counter).
+#[derive(Debug)]
+struct Point {
+    name: String,
+    unit: String,
+    attributes: Vec<(String, String)>,
+    value: u64,
+}
+
+fn points(captured: &Captured) -> Vec<Point> {
+    let resource_metrics = captured.metrics.get_finished_metrics().unwrap();
+    let last = resource_metrics.last().expect("metrics exported");
+    let mut out = Vec::new();
+    for scope in last.scope_metrics() {
+        for metric in scope.metrics() {
+            let name = metric.name().to_owned();
+            let unit = metric.unit().to_owned();
+            let mut push = |attributes: Vec<(String, String)>, value: u64| {
+                out.push(Point {
+                    name: name.clone(),
+                    unit: unit.clone(),
+                    attributes,
+                    value,
+                });
+            };
+            let attrs = |it: &mut dyn Iterator<Item = &opentelemetry::KeyValue>| {
+                let mut v: Vec<(String, String)> = it
+                    .map(|kv| (kv.key.as_str().to_owned(), kv.value.to_string()))
+                    .collect();
+                v.sort();
+                v
+            };
+            match metric.data() {
+                AggregatedMetrics::U64(MetricData::Sum(sum)) => {
+                    for p in sum.data_points() {
+                        push(attrs(&mut p.attributes()), p.value());
+                    }
+                }
+                AggregatedMetrics::F64(MetricData::Histogram(h)) => {
+                    for p in h.data_points() {
+                        push(attrs(&mut p.attributes()), p.count());
+                    }
+                }
+                AggregatedMetrics::U64(MetricData::Histogram(h)) => {
+                    for p in h.data_points() {
+                        push(attrs(&mut p.attributes()), p.count());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn find<'a>(points: &'a [Point], name: &str, attrs: &[(&str, &str)]) -> Vec<&'a Point> {
+    points
+        .iter()
+        .filter(|p| {
+            p.name == name
+                && attrs
+                    .iter()
+                    .all(|(k, v)| p.attributes.iter().any(|(pk, pv)| pk == k && pv == v))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn tool_calls_and_model_requests_become_rig_metrics() {
+    let captured = capture(|| async {
+        let model = MockCompletionModel::from_turns([
+            MockTurn::tool_call("call-1", "add", json!({"a": 2, "b": 40}))
+                .with_usage(tokens(30, 5)),
+            MockTurn::tool_call("call-2", "fail", json!({})).with_usage(tokens(40, 5)),
+            MockTurn::text("the sum is 42; the second tool failed").with_usage(tokens(50, 9)),
+        ]);
+        let agent = AgentBuilder::new(model)
+            .name("calculator")
+            .tool(Add)
+            .tool(Fail)
+            .default_max_turns(4)
+            .build();
+        agent
+            .prompt("What is 2 + 40, and then fail?")
+            .await
+            .unwrap();
+    })
+    .await;
+    let points = points(&captured);
+    // The new metrics carry only the agent, tool and error-type attributes.
+    for p in points.iter().filter(|p| p.name.starts_with("rig.")) {
+        for (key, _) in &p.attributes {
+            assert!(
+                matches!(
+                    key.as_str(),
+                    "gen_ai.agent.name" | "gen_ai.tool.name" | "error.type"
+                ),
+                "{} carries {key}",
+                p.name
+            );
+        }
+    }
+
+    let agent = [("gen_ai.agent.name", "calculator")];
+    let add = [
+        ("gen_ai.agent.name", "calculator"),
+        ("gen_ai.tool.name", "add"),
+    ];
+    let fail = [
+        ("gen_ai.agent.name", "calculator"),
+        ("gen_ai.tool.name", "fail"),
+    ];
+
+    // Tool calls: one per execute_tool span, per tool.
+    let calls = find(&points, "rig.tool.call_count", &add);
+    assert_eq!(calls.len(), 1, "{points:#?}");
+    assert_eq!((calls[0].unit.as_str(), calls[0].value), ("{call}", 1));
+    let calls = find(&points, "rig.tool.call_count", &fail);
+    assert_eq!((calls[0].unit.as_str(), calls[0].value), ("{call}", 1));
+
+    // Successes and errors: the successful call only succeeds, the failed one only errors.
+    let successes = find(&points, "rig.tool.success_count", &add);
+    assert_eq!(
+        (successes[0].unit.as_str(), successes[0].value),
+        ("{call}", 1)
+    );
+    assert!(find(&points, "rig.tool.success_count", &fail).is_empty());
+    let errors = find(&points, "rig.tool.error_count", &fail);
+    assert_eq!(errors.len(), 1, "{points:#?}");
+    assert_eq!((errors[0].unit.as_str(), errors[0].value), ("{call}", 1));
+    assert!(
+        errors[0]
+            .attributes
+            .iter()
+            .any(|(k, v)| k == "error.type" && !v.is_empty()),
+        "{:?}",
+        errors[0]
+    );
+    assert!(find(&points, "rig.tool.error_count", &add).is_empty());
+
+    // Tool duration: one recording per call; the failed one carries error.type.
+    let durations = find(&points, "rig.tool.duration", &add);
+    assert_eq!((durations[0].unit.as_str(), durations[0].value), ("s", 1));
+    let durations = find(&points, "rig.tool.duration", &fail);
+    assert_eq!((durations[0].unit.as_str(), durations[0].value), ("s", 1));
+    assert!(
+        durations[0]
+            .attributes
+            .iter()
+            .any(|(k, _)| k == "error.type")
+    );
+
+    // Model requests: one per chat span, three here.
+    let requests = find(&points, "rig.model.request_count", &agent);
+    assert_eq!(requests.len(), 1, "{points:#?}");
+    assert_eq!(
+        (requests[0].unit.as_str(), requests[0].value),
+        ("{request}", 3)
+    );
+    let request_durations = find(&points, "rig.model.request_duration", &agent);
+    assert_eq!(
+        (
+            request_durations[0].unit.as_str(),
+            request_durations[0].value
+        ),
+        ("s", 3)
+    );
+
+    // The existing metrics are still there, unchanged.
+    assert!(!find(&points, "gen_ai.client.operation.duration", &[]).is_empty());
+    assert!(!find(&points, "gen_ai.client.token.usage", &[]).is_empty());
+}

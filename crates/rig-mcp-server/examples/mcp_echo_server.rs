@@ -1,7 +1,8 @@
 //! A deterministic MCP server for interoperability tests: no model, no API key.
 //!
-//! Serves an `echo` agent (answers "pong", streamed as "po" + "ng") and a
-//! read-only `add` tool, over stdio or Streamable HTTP:
+//! Serves an `echo` agent (answers "pong", streamed as "po" + "ng"), a
+//! read-only `add` tool, a text and a binary resource, and an `explain` prompt,
+//! over stdio or Streamable HTTP:
 //!
 //! ```sh
 //! cargo run --example mcp_echo_server              # stdio
@@ -13,7 +14,9 @@ use rig_core::completion::ToolAnnotations;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
 use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
 use rig_mcp_server::McpServer;
+use rmcp::model::{PromptArgument, PromptMessage, Role};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 
 /// How many calls the scripted agent answers.
 const REPLIES: usize = 1_000;
@@ -65,7 +68,28 @@ async fn main() -> Result<(), rig_mcp_server::ServeError> {
         .name("Echo")
         .description("Answers every message with pong.")
         .build();
-    let mut server = McpServer::new("echo").agent(agent).tool(Add);
+    let mut server = McpServer::new("echo")
+        .agent(agent)
+        .tool(Add)
+        .resource("memo://intro", "intro", "text/markdown", "# Hello")
+        .binary_resource(
+            "blob://logo",
+            "logo",
+            "application/octet-stream",
+            [1_u8, 2, 3],
+        )
+        .prompt(
+            "explain",
+            "Explain a topic.",
+            vec![PromptArgument::new("topic").with_required(true)],
+            |args: &HashMap<String, String>| {
+                let topic = args.get("topic").map_or("", String::as_str);
+                vec![PromptMessage::new_text(
+                    Role::User,
+                    format!("Explain {topic} in one paragraph."),
+                )]
+            },
+        );
 
     if std::env::args().nth(1).as_deref() != Some("http") {
         return server.serve_stdio().await;

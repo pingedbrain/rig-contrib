@@ -80,8 +80,12 @@ async fn resources_are_listed_and_read_back() -> anyhow::Result<()> {
 
     let missing = client
         .read_resource(ReadResourceRequestParams::new("memo://nope"))
-        .await;
-    ensure!(missing.is_err(), "an unknown URI is an error");
+        .await
+        .err();
+    ensure!(
+        matches!(&missing, Some(ServiceError::McpError(data)) if data.code == ErrorCode::RESOURCE_NOT_FOUND),
+        "an unknown URI is -32002 (resource_not_found): {missing:?}"
+    );
     Ok(())
 }
 

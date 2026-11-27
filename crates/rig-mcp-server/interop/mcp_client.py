@@ -9,6 +9,7 @@ rmcp's own client.
 """
 
 import asyncio
+import base64
 import sys
 from contextlib import asynccontextmanager
 
@@ -58,6 +59,37 @@ async def main(mode: str, target: str, token: str | None) -> None:
         session_id = first.structuredContent["session_id"]
         again = await session.call_tool("echo", {"message": "again", "session_id": session_id})
         check(again.structuredContent["session_id"] == session_id, f"{mode}: the session continues")
+
+        resources = {str(r.uri): r for r in (await session.list_resources()).resources}
+        check(set(resources) == {"memo://intro", "blob://logo"}, f"{mode}: resources are intro and logo ({sorted(resources)})")
+        check(resources["memo://intro"].mimeType == "text/markdown", f"{mode}: intro is text/markdown")
+        check(resources["blob://logo"].mimeType == "application/octet-stream", f"{mode}: logo is octet-stream")
+
+        intro = await session.read_resource("memo://intro")
+        text = intro.contents[0]
+        check(
+            text.text == "# Hello" and text.mimeType == "text/markdown",
+            f"{mode}: intro reads back as markdown ({text.text!r}, {text.mimeType})",
+        )
+        logo = await session.read_resource("blob://logo")
+        blob = logo.contents[0]
+        check(
+            blob.blob == base64.b64encode(bytes([1, 2, 3])).decode() and blob.mimeType == "application/octet-stream",
+            f"{mode}: logo is the base64 of [1, 2, 3] ({blob.blob}, {blob.mimeType})",
+        )
+
+        prompts = (await session.list_prompts()).prompts
+        check(
+            [p.name for p in prompts] == ["explain"]
+            and [(a.name, a.required) for a in prompts[0].arguments] == [("topic", True)],
+            f"{mode}: explain takes a required topic",
+        )
+        rendered = await session.get_prompt("explain", {"topic": "borrowing"})
+        message = rendered.messages[0]
+        check(
+            message.content.text == "Explain borrowing in one paragraph.",
+            f"{mode}: explain renders its message ({message.content.text!r})",
+        )
 
 
 if __name__ == "__main__":

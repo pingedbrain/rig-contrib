@@ -9,6 +9,7 @@ readme = "README.md"
 description = "Run a Rig agent on AWS Bedrock AgentCore Runtime: the HTTP protocol contract (/invocations, /ping), sessions, streaming and traces AgentCore Observability and Evaluations read."
 keywords = ["rig", "agentcore", "aws", "agents", "llm"]
 categories = ["web-programming::http-server"]
+exclude = ["deploy/"]
 
 [dependencies]
 axum = "0.8"
