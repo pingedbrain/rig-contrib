@@ -1,8 +1,8 @@
 //! Serve a Rig agent on the AgentCore Runtime HTTP contract, locally.
 //!
 //! Listens on `PORT` (default 8080), the port AgentCore sends to. Without
-//! AWS, a scripted model answers each invocation with the next line of a
-//! fixed script, and logs how many messages each request carries, so a
+//! AWS, a scripted model answers each invocation with the next numbered
+//! reply, never running out, and logs how many messages each request carries, so a
 //! session's history shows up as it grows. Set `OPENROUTER_MODEL` and
 //! `OPENROUTER_API_KEY` to answer with an OpenRouter model instead.
 //!
@@ -32,26 +32,21 @@
 //! to Amazon ECR and runs it on AgentCore Runtime, which then sends the same
 //! requests. This example creates no AWS resources.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use rig_agent::AgentBuilder;
 use rig_agentcore::AgentCoreApp;
 use rig_core::completion::CompletionRequest;
 use rig_core::driver::{Exchange, Model, Opening, Transport};
-use rig_core::test_utils::{
-    MockCompletionModel, MockFrame, MockRuntime, MockScript, MockStreamEvent, MockTurn,
-};
+use rig_core::test_utils::{MockCompletionModel, MockFrame, MockScript, MockStreamEvent, MockTurn};
 use rig_core::wire::Mode;
 
-/// Replies the scripted model gives before it runs out. Each invocation uses
-/// one reply; past this many the run fails with a 500.
-// ponytail: fixed script per process, no cycling; OpenRouter for longer runs.
-const SCRIPTED_REPLIES: usize = 1000;
-
-/// Rig's mock answers from one script per mode, so this transport keeps one
-/// of each: a whole reply and a streamed one carry the same scripted text.
-#[derive(Clone)]
+/// Numbers the scripted replies. Rig's mock takes its turns up front, so each
+/// request gets a fresh one-turn mock, which keeps the script endless.
+#[derive(Clone, Default)]
 struct Scripted {
-    whole: MockRuntime,
-    streamed: MockRuntime,
+    replies: Arc<AtomicUsize>,
 }
 
 impl Transport<MockScript> for Scripted {
@@ -61,30 +56,24 @@ impl Transport<MockScript> for Scripted {
             "scripted model: {} message(s) in the request",
             request.chat_history.len()
         );
+        let n = self.replies.fetch_add(1, Ordering::Relaxed) + 1;
+        let text = format!("Scripted reply {n}.");
         match exchange.mode {
-            Mode::Unary => self.whole.send(request, exchange),
-            Mode::Streaming => self.streamed.send(request, exchange),
+            Mode::Unary => MockCompletionModel::from_turns([MockTurn::text(text)])
+                .transport
+                .send(request, exchange),
+            Mode::Streaming => MockCompletionModel::from_stream_turns([vec![
+                MockStreamEvent::text(text),
+                MockStreamEvent::final_response_with_default_usage(),
+            ]])
+            .transport
+            .send(request, exchange),
         }
     }
 }
 
 fn scripted_model() -> Model<MockScript, Scripted> {
-    let text = |n: usize| format!("Scripted reply {n}.");
-    let whole =
-        MockCompletionModel::from_turns((1..=SCRIPTED_REPLIES).map(|n| MockTurn::text(text(n))));
-    let streamed = MockCompletionModel::from_stream_turns((1..=SCRIPTED_REPLIES).map(|n| {
-        vec![
-            MockStreamEvent::text(text(n)),
-            MockStreamEvent::final_response_with_default_usage(),
-        ]
-    }));
-    Model::new(
-        MockScript::default(),
-        Scripted {
-            whole: whole.transport,
-            streamed: streamed.transport,
-        },
-    )
+    Model::new(MockScript::default(), Scripted::default())
 }
 
 const PREAMBLE: &str = "You are a concise, friendly assistant.";
@@ -105,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
             AgentCoreApp::new(agent).serve().await?;
         }
         _ => {
-            println!("model: scripted ({SCRIPTED_REPLIES} replies)");
+            println!("model: scripted (endless)");
             let agent = AgentBuilder::new(scripted_model())
                 .name("Rig AgentCore helper")
                 .preamble(PREAMBLE)
