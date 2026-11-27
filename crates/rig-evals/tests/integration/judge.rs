@@ -4,8 +4,10 @@ use rig_agent::AgentBuilder;
 use rig_core::completion::FinishReason;
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
 use rig_evals::{
-    Case, Evaluator, Experiment, LlmJudge, TargetError, TargetOutput, Trial, target_fn,
+    Case, Evaluator, Experiment, LlmJudge, TargetError, TargetOutput, ToolCall, Trial, Turn,
+    target_fn,
 };
+use serde_json::json;
 
 use crate::tokens;
 
@@ -155,4 +157,121 @@ async fn a_reply_cut_at_max_tokens_says_so_and_keeps_its_usage() {
         Some("the judge returned no verdict: the reply was truncated at max_tokens (64)")
     );
     assert_eq!(score.usage, Some(tokens(40, 64)));
+}
+
+/// The judge's prompt as the model received it.
+fn sent(model: &MockCompletionModel) -> String {
+    let request = model.requests().into_iter().next().expect("one request");
+    serde_json::to_string(&request.chat_history).expect("json")
+}
+
+#[tokio::test]
+async fn helpfulness_sends_its_rubric_and_the_answer_and_parses_the_score() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 0.9, "reasoning": "Answers the question."}"#,
+    )]);
+    let judge = LlmJudge::helpfulness(AgentBuilder::new(model.clone()).build());
+    let score = judge
+        .evaluate(&case(), &Trial::new("capital", 1, "It is Paris."))
+        .await
+        .expect("a verdict");
+
+    assert_eq!(score.evaluator, "helpfulness");
+    assert!(score.passed);
+    assert_eq!(score.value, 0.9);
+    assert_eq!(score.explanation.as_deref(), Some("Answers the question."));
+
+    let sent = sent(&model);
+    for part in [
+        "Score how helpful the answer is",
+        "What is the capital of France?",
+        "It is Paris.",
+    ] {
+        assert!(sent.contains(part), "the prompt lacks {part:?}");
+    }
+}
+
+#[tokio::test]
+async fn faithfulness_sends_the_transcript_and_tool_calls_and_parses_the_score() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 0.4, "reasoning": "The price is not in the evidence."}"#,
+    )]);
+    let judge = LlmJudge::faithfulness(AgentBuilder::new(model.clone()).build());
+    let mut trial = Trial::new("capital", 1, "The fare is 42 euros.");
+    trial.tool_calls = vec![ToolCall::new("lookup_fare", json!({"route": "LIS-OPO"}))];
+    trial.transcript = vec![Turn::new("How much is the train?", "Let me check.")];
+    let score = judge.evaluate(&case(), &trial).await.expect("a verdict");
+
+    assert_eq!(score.evaluator, "faithfulness");
+    assert!(!score.passed, "0.4 is below the default threshold");
+    assert_eq!(score.value, 0.4);
+    assert_eq!(
+        score.explanation.as_deref(),
+        Some("The price is not in the evidence.")
+    );
+
+    let sent = sent(&model);
+    for part in [
+        "Score whether the answer is faithful",
+        "Tool outputs are not shown",
+        "lookup_fare",
+        "LIS-OPO",
+        "How much is the train?",
+        "Let me check.",
+        "The fare is 42 euros.",
+    ] {
+        assert!(sent.contains(part), "the prompt lacks {part:?}");
+    }
+}
+
+#[tokio::test]
+async fn goal_success_sends_every_turn_and_parses_the_score() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 1.0, "reasoning": "Booked on the second turn."}"#,
+    )]);
+    let judge = LlmJudge::goal_success(AgentBuilder::new(model.clone()).build());
+    let case = Case::multi_turn(
+        "booking",
+        ["Book a table for two.", "Make it 19:00.", "Confirm it."],
+    )
+    .expected("Table booked for two at 19:00.");
+    let mut trial = Trial::new("booking", 1, "Booked: two people, 19:00.");
+    trial.transcript = vec![
+        Turn::new("Book a table for two.", "For when?"),
+        Turn::new("Make it 19:00.", "Done for 19:00."),
+        Turn::new("Confirm it.", "Booked: two people, 19:00."),
+    ];
+    let score = judge.evaluate(&case, &trial).await.expect("a verdict");
+
+    assert_eq!(score.evaluator, "goal_success");
+    assert!(score.passed);
+    assert_eq!(score.value, 1.0);
+
+    let sent = sent(&model);
+    for part in [
+        "Score whether the agent achieved the user's goal",
+        "1. Book a table for two.",
+        "2. Make it 19:00.",
+        "3. Confirm it.",
+        "User: Book a table for two.",
+        "Agent: For when?",
+        "Agent: Done for 19:00.",
+        "Table booked for two at 19:00.",
+    ] {
+        assert!(sent.contains(part), "the prompt lacks {part:?}");
+    }
+}
+
+#[tokio::test]
+async fn presets_keep_the_default_threshold_and_can_be_retuned() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 0.6, "reasoning": "Partly."}"#,
+    )]);
+    let judge = LlmJudge::goal_success(AgentBuilder::new(model).build()).threshold(0.7);
+    let score = judge
+        .evaluate(&case(), &Trial::new("capital", 1, "Paris"))
+        .await
+        .expect("a verdict");
+    assert!(!score.passed);
+    assert_eq!(score.evaluator, "goal_success");
 }
