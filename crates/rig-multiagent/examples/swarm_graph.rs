@@ -7,14 +7,20 @@
 //!
 //! # Live: every agent calls a model on OpenRouter. Set the model to use; the
 //! # key is read from OPENROUTER_API_KEY and never printed. Replies are capped
-//! # at 256 tokens to keep the run cheap.
+//! # at 1024 tokens to keep the run cheap; a reasoning model needs the room.
 //! OPENROUTER_API_KEY=... OPENROUTER_MODEL=deepseek/deepseek-chat \
+//!     cargo run -p rig-multiagent --example swarm_graph
+//!
+//! # Live on OpenCode Go instead: RIG_MODEL=opencode-go/<model>, with the key in
+//! # OPENCODE_GO_API_KEY (or OPENCODE_API_KEY), never printed.
+//! RIG_MODEL=opencode-go/glm-5.3 OPENCODE_GO_API_KEY=... \
 //!     cargo run -p rig-multiagent --example swarm_graph
 //! ```
 //!
-//! Live mode is chosen by `OPENROUTER_MODEL`, not by the key alone, so a key in
-//! the environment does not start paid calls by accident. The scripted
-//! answers come from Rig's mock models, as the crate's tests use them; in live
+//! Live mode is chosen by `OPENROUTER_MODEL` or `RIG_MODEL`, not by the key
+//! alone, so a key in the environment does not start paid calls by accident.
+//! The scripted answers come from Rig's mock models, as the crate's tests use
+//! them; in live
 //! mode the model decides what each agent says, so only the scripted run
 //! checks the join. A live model may also keep handing off instead of
 //! answering, so a live run can stop at `max_handoffs` with an error.
@@ -27,7 +33,7 @@ use rig_core::DynModel;
 use rig_core::completion::CompletionRequest;
 use rig_core::operation::Completion;
 use rig_core::providers::openai::OpenAI;
-use rig_core::providers::openrouter;
+use rig_core::providers::{opencode, openrouter};
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent, MockTurn};
 use rig_multiagent::{Graph, HANDOFF_TOOL, Swarm, SwarmEvent};
 use serde_json::json;
@@ -44,6 +50,21 @@ enum Backend {
 
 impl Backend {
     fn from_env() -> Result<Self> {
+        // RIG_MODEL=opencode-go/<model> picks OpenCode Go; any other value
+        // is ignored here and OPENROUTER_MODEL decides, as before.
+        if let Ok(model) = std::env::var("RIG_MODEL")
+            && let Some(name) = model.strip_prefix("opencode-go/")
+        {
+            if name.is_empty() {
+                return Err("RIG_MODEL is opencode-go/ with no model name".into());
+            }
+            let key = std::env::var("OPENCODE_GO_API_KEY")
+                .or_else(|_| std::env::var("OPENCODE_API_KEY"))?;
+            return Ok(Self::Live {
+                client: opencode::go_new(key),
+                model: name.to_owned(),
+            });
+        }
         match std::env::var("OPENROUTER_MODEL") {
             Ok(model) if !model.is_empty() => Ok(Self::Live {
                 client: openrouter::from_env()?,
@@ -108,7 +129,7 @@ fn build(model: impl Into<DynModel<Completion>>, name: &str, description: &str) 
     AgentBuilder::new(model)
         .name(name)
         .description(description)
-        .max_tokens(256)
+        .max_tokens(1024)
         .build()
 }
 
@@ -163,14 +184,32 @@ async fn swarm_run(backend: &Backend) -> Result {
         .agent(writer)
         .max_handoffs(6)
         .build()?;
-    let run = team.run("What does this project do?").await?;
+    let run = match team.run("What does this project do?").await {
+        Ok(run) => run,
+        Err(error) => {
+            // Live runs can hand off until the limit; show the trail anyway.
+            for handoff in &error.handoffs {
+                println!(
+                    "handoff {} -> {}: {}",
+                    handoff.from, handoff.to, handoff.message
+                );
+            }
+            println!("handoffs: {}, failed: {error}", error.handoffs.len());
+            return Err(error.into());
+        }
+    };
     for handoff in &run.handoffs {
         println!(
             "handoff {} -> {}: {}",
             handoff.from, handoff.to, handoff.message
         );
     }
-    println!("{} answered: {}\n", run.agent, run.answer);
+    println!(
+        "handoffs: {}, {} answered: {}\n",
+        run.handoffs.len(),
+        run.agent,
+        run.answer
+    );
     Ok(())
 }
 

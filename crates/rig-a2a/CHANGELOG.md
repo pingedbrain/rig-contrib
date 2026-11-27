@@ -2,7 +2,7 @@
 
 Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
-## Unreleased
+## 0.47.3 (2026-11-27)
 
 - Example `remote_tool`: a local Rig agent calls an in-process A2A agent as a tool. Models:
   OpenRouter, or OpenCode Go with `RIG_MODEL=opencode-go/<model>`.

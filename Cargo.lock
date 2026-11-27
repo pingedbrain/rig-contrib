@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "rig-a2a"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "a2a-client-lf",
  "a2a-lf",
@@ -2645,7 +2645,7 @@ dependencies = [
 
 [[package]]
 name = "rig-agentcore"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2702,7 +2702,7 @@ dependencies = [
 
 [[package]]
 name = "rig-evals"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "aws-config",
  "aws-sdk-bedrockagentcore",
@@ -2745,7 +2745,7 @@ dependencies = [
 
 [[package]]
 name = "rig-mcp-server"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -2788,7 +2788,7 @@ dependencies = [
 
 [[package]]
 name = "rig-multiagent"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "futures",
  "opentelemetry",
@@ -2807,7 +2807,7 @@ dependencies = [
 
 [[package]]
 name = "rig-otel"
-version = "0.47.2"
+version = "0.47.3"
 dependencies = [
  "async-trait",
  "aws-config",
