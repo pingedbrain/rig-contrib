@@ -17,9 +17,16 @@ pub(crate) mod warnings {
 
     static RECORDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    /// Takes and clears the warnings recorded so far.
-    pub(crate) fn take() -> Vec<String> {
-        std::mem::take(&mut *RECORDED.lock().unwrap_or_else(|e| e.into_inner()))
+    /// The recorded warnings that contain `needle`. Tests run in parallel and
+    /// share this buffer, so each one filters by a string unique to it.
+    pub(crate) fn containing(needle: &str) -> Vec<String> {
+        RECORDED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|message| message.contains(needle))
+            .cloned()
+            .collect()
     }
 
     pub(crate) struct Recorder;
@@ -68,16 +75,10 @@ fn build_with_endpoint(endpoint: &str) -> Telemetry {
 #[test]
 fn an_invalid_endpoint_is_reported_and_setup_still_succeeds() {
     crate::pin_global_default();
-    let _ = warnings::take();
-
     let _telemetry = build_with_endpoint("not-a-url");
 
-    let warned = warnings::take();
+    let warned = warnings::containing("OTEL_EXPORTER_OTLP_ENDPOINT=not-a-url");
     assert_eq!(warned.len(), 1, "{warned:?}");
-    assert!(
-        warned[0].contains("OTEL_EXPORTER_OTLP_ENDPOINT=not-a-url"),
-        "{warned:?}"
-    );
 }
 
 #[test]
@@ -90,7 +91,6 @@ fn an_unreachable_endpoint_warns_once_naming_the_endpoint_and_signal() {
         .port();
     let endpoint = format!("http://127.0.0.1:{port}");
     let telemetry = build_with_endpoint(&endpoint);
-    let _ = warnings::take();
 
     let tracer = telemetry.tracer_provider().tracer("endpoint-test");
     for _ in 0..3 {
@@ -98,8 +98,7 @@ fn an_unreachable_endpoint_warns_once_naming_the_endpoint_and_signal() {
         assert!(telemetry.tracer_provider().force_flush().is_err());
     }
 
-    let warned = warnings::take();
+    let warned = warnings::containing(&endpoint);
     assert_eq!(warned.len(), 1, "{warned:?}");
-    assert!(warned[0].contains(&endpoint), "{warned:?}");
-    assert!(warned[0].contains("traces"), "{warned:?}");
+    assert!(warned[0].contains("OTLP traces export"), "{warned:?}");
 }

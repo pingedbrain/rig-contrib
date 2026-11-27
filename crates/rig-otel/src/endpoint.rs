@@ -88,14 +88,22 @@ impl Reporter {
 
     fn check(&self, result: OTelSdkResult) -> OTelSdkResult {
         if let Err(err) = &result {
-            let mut throttle = self.throttle.lock().unwrap_or_else(PoisonError::into_inner);
-            let now = Instant::now();
-            if throttle
-                .reported_at
-                .is_none_or(|at| now.duration_since(at) >= REPORT_EVERY)
-            {
-                let skipped = std::mem::take(&mut throttle.skipped);
-                throttle.reported_at = Some(now);
+            // Decide under the lock, log after it is released.
+            let report = {
+                let mut throttle = self.throttle.lock().unwrap_or_else(PoisonError::into_inner);
+                let now = Instant::now();
+                if throttle
+                    .reported_at
+                    .is_none_or(|at| now.duration_since(at) >= REPORT_EVERY)
+                {
+                    throttle.reported_at = Some(now);
+                    Some(std::mem::take(&mut throttle.skipped))
+                } else {
+                    throttle.skipped += 1;
+                    None
+                }
+            };
+            if let Some(skipped) = report {
                 let more = if skipped > 0 {
                     format!(" ({skipped} more since the last warning)")
                 } else {
@@ -106,8 +114,6 @@ impl Reporter {
                     self.signal,
                     self.endpoint
                 );
-            } else {
-                throttle.skipped += 1;
             }
         }
         result
