@@ -140,7 +140,8 @@ impl Tool for Refund {
     }
 }
 
-/// Answers each case of `support.jsonl` as a scripted agent would.
+/// Answers each case of `support.jsonl` as a scripted agent would. The
+/// multi-turn case (`refund-followup`) gets its last turn's answer.
 fn scripted_target() -> impl Target {
     target_fn(|case: Case| async move {
         let output = match case.id.as_str() {
@@ -152,6 +153,8 @@ fn scripted_target() -> impl Target {
             }
             "hours" => TargetOutput::new("We are open 9 to 5, Monday to Friday."),
             "greeting" => TargetOutput::new("Hello! How can I help?"),
+            "refund-followup" => TargetOutput::new("A refund was issued for order 7.")
+                .with_tool_calls(vec![ToolCall::new("refund", json!({"id": 7}))]),
             "order9" => TargetOutput::new("Order 9 has shipped.")
                 .with_tool_calls(vec![ToolCall::new("lookup_order", json!({"id": 9}))]),
             "cancel" => TargetOutput::new("Cancel under Settings, then Billing."),
@@ -163,7 +166,7 @@ fn scripted_target() -> impl Target {
 
 /// One verdict per case: the judge runs once per trial, in case order.
 fn scripted_judge() -> LlmJudge {
-    let verdicts = (0..5)
+    let verdicts = (0..6)
         .map(|_| MockTurn::text(r#"{"score": 0.9, "reasoning": "Polite, correct and on topic."}"#));
     let agent = AgentBuilder::new(MockCompletionModel::from_turns(verdicts)).build();
     LlmJudge::new(agent, RUBRIC).threshold(0.7)
