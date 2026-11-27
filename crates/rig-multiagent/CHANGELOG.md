@@ -4,6 +4,15 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- Fix: the agent a handoff reaches is now given what the agents before it wrote and read
+  in their turns (text and tool results), not only the handoff message and context. Before,
+  the next agent saw only that message, so the work a handed-back agent had done was lost
+  to it. The prompt now says an agent that can complete the request should answer it, and
+  hands off only when another agent must act. No API change; checkpoints from before still
+  load. The forwarded work is cut to 4 KiB an entry and 32 KiB in all, oldest first.
+- `examples/swarm_graph.rs`: `RIG_MODEL=opencode-go/<model>` runs the live snippets on OpenCode
+  Go (`OPENCODE_GO_API_KEY`); live replies may use 1024 tokens; a failed swarm run prints its
+  handoffs.
 - `Swarm::detect_repetition` is documented and tested: two agents passing the work back
   and forth fail with `SwarmFailure::Repetitive` once the last window of turns went to
   fewer agents than the minimum. Still off by default; a run with no window is never

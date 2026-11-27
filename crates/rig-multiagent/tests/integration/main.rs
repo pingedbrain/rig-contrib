@@ -13,6 +13,7 @@
 mod cache_key;
 mod durable;
 mod graph;
+mod handoff;
 mod human;
 mod resume;
 mod stream;
