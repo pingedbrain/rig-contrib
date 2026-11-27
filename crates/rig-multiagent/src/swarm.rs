@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rig_agent::Agent;
 use rig_agent::agent::{AgentHook, HookContext, OutcomeAction, OutcomeEvent};
 use rig_agent::completion::PromptError;
-use rig_core::completion::Usage;
+use rig_core::completion::{AssistantContent, Usage};
 use rig_core::tool::{Tool, ToolContext, ToolExecutionError};
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmBoxedStream, WasmCompatSend, WasmCompatSync};
 use serde::{Deserialize, Serialize};
@@ -36,11 +36,13 @@ pub const ASK_TOOL: &str = "ask_human";
 /// A team of agents that pass the work to each other.
 ///
 /// The run starts with the [entry](SwarmBuilder::entry) agent. Each agent
-/// sees the task, who worked on it before, what they shared, and the other
-/// agents it can hand off to; it either answers, which ends the run with
-/// that answer, or calls [`handoff_to_agent`](HANDOFF_TOOL), which ends its
-/// turn and starts the agent it named. Every agent run starts fresh: what
-/// one agent tells the next travels in the handoff message and context.
+/// sees the task, who worked on it before, what they shared and what they
+/// wrote and read before handing off, and the other agents it can hand off
+/// to; it either answers, which ends the run with that answer, or calls
+/// [`handoff_to_agent`](HANDOFF_TOOL), which ends its turn and starts the
+/// agent it named. Every agent run starts with a fresh conversation: the
+/// earlier agents' work reaches the next one as text in its prompt, not as
+/// messages it made itself.
 ///
 /// Cloning is cheap; clones share the agents.
 #[derive(Clone)]
@@ -369,6 +371,9 @@ struct Trail {
     agents: Vec<String>,
     handoffs: Vec<Handoff>,
     shared: Vec<(String, Value)>,
+    /// What each agent that handed off wrote and read in its turn, in order.
+    #[serde(default)]
+    work: Vec<(String, Vec<String>)>,
     usage: Usage,
 }
 
@@ -683,6 +688,7 @@ impl Swarm {
                     .cloned()
                     .collect(),
                 handoff: Mutex::new(None),
+                work: Mutex::new(Vec::new()),
                 questions: Mutex::new(None),
             });
             let meter = Meter::default();
@@ -765,6 +771,10 @@ impl Swarm {
                     if let Some(context) = &handoff.context {
                         trail.shared.push((handoff.from.clone(), context.clone()));
                     }
+                    let work = turn.take_work();
+                    if !work.is_empty() {
+                        trail.work.push((handoff.from.clone(), work));
+                    }
                     message = Some(handoff.message.clone());
                     if let Some(emit) = emit {
                         emit(SwarmEvent::Handoff(handoff.clone()));
@@ -826,6 +836,13 @@ impl Swarm {
             }
             text.push('\n');
         }
+        for (agent, work) in &trail.work {
+            let _ = writeln!(text, "What {agent} wrote and read before handing off:");
+            for line in work {
+                let _ = writeln!(text, "{line}");
+            }
+            text.push('\n');
+        }
         let others: Vec<&Member> = members
             .iter()
             .filter(|member| member.name != current.name)
@@ -845,9 +862,10 @@ impl Swarm {
             }
             let _ = write!(
                 text,
-                "\nTo pass the work on, call {HANDOFF_TOOL} with the agent's name and a message \
-                 saying what it should do; your turn ends there. If you answer instead, your \
-                 answer is the final one."
+                "\nIf you can complete the user request yourself, answer it: your answer is the \
+                 final one. Hand off only when another agent must do something you cannot, by \
+                 calling {HANDOFF_TOOL} with the agent's name and a message saying what it should \
+                 do; your turn ends there."
             );
         }
         if self.inner.questions {
@@ -897,6 +915,9 @@ struct Turn {
     others: Vec<Arc<Member>>,
     /// The handoff it made, with the member it hands off to.
     handoff: Mutex<Option<(Handoff, Arc<Member>)>>,
+    /// The text the agent wrote and the tool results it got, in order, for
+    /// the agents after it.
+    work: Mutex<Vec<String>>,
     /// Where the ask tool sends questions; `None` when nobody can answer.
     questions: Mutex<Option<mpsc::UnboundedSender<Question>>>,
 }
@@ -914,6 +935,16 @@ impl Turn {
 
     fn take(&self) -> Option<(Handoff, Arc<Member>)> {
         self.slot().take()
+    }
+
+    fn note(&self, lines: impl IntoIterator<Item = String>) {
+        let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
+        work.extend(lines.into_iter().filter(|line| !line.trim().is_empty()));
+    }
+
+    fn take_work(&self) -> Vec<String> {
+        let mut work = self.work.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *work)
     }
 }
 
@@ -1070,12 +1101,28 @@ impl Tool for AskTool {
 }
 
 /// Ends an agent's turn once it has handed off, so it does not keep working
-/// on what the next agent now owns.
+/// on what the next agent now owns. It also notes the turn's text and tool
+/// results, which the agents after it are given as the work so far.
 struct StopOnHandoff(Arc<Turn>);
 
 impl AgentHook for StopOnHandoff {
     async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
-        if event.tool_result().is_some() && self.0.slot().is_some() {
+        let handed_off = self.0.slot().is_some();
+        if let Some(response) = event.completion() {
+            self.0.note(
+                response
+                    .choice
+                    .iter()
+                    .filter_map(AssistantContent::as_text)
+                    .map(str::to_owned),
+            );
+        } else if let Some(result) = event.tool_result()
+            && !handed_off
+        {
+            // The handoff's own result is left out: the next agent is told it.
+            self.0.note([result.output().render()]);
+        }
+        if event.tool_result().is_some() && handed_off {
             OutcomeAction::stop("handed off")
         } else {
             OutcomeAction::proceed()
