@@ -64,12 +64,22 @@ pub struct TrialResult {
 impl TrialResult {
     /// Whether every evaluator passed the run.
     pub fn passed(&self) -> bool {
-        self.scores.iter().all(|score| score.passed)
+        self.scores
+            .iter()
+            .all(|score| score.passed || score.not_applicable)
     }
 
-    /// The scores that failed.
+    /// Whether an evaluator did not apply to the run: with no failure, the
+    /// run is reported as skipped in JUnit.
+    fn skipped(&self) -> bool {
+        self.scores.iter().any(|score| score.not_applicable)
+    }
+
+    /// The scores that failed (not the ones not applicable).
     pub fn failures(&self) -> impl Iterator<Item = &Score> {
-        self.scores.iter().filter(|score| !score.passed)
+        self.scores
+            .iter()
+            .filter(|score| !score.passed && !score.not_applicable)
     }
 }
 
@@ -79,14 +89,18 @@ impl TrialResult {
 pub struct EvaluatorSummary {
     /// The evaluator.
     pub evaluator: String,
-    /// The trials scored.
+    /// The trials scored (not counting the ones not applicable).
     pub count: usize,
     /// The trials it passed.
     pub passed: usize,
-    /// `passed / count`.
+    /// `passed / count`; 0 when no trial was applicable.
     pub pass_rate: f64,
-    /// The mean score value.
+    /// The mean score value over the trials scored.
     pub mean: f64,
+    /// The trials the evaluator did not apply to (N/A): left out of
+    /// `count`, `pass_rate` and `mean`.
+    #[serde(default)]
+    pub not_applicable: usize,
 }
 
 /// Model tokens over all trials.
@@ -123,7 +137,7 @@ pub struct ThresholdResult {
     pub min_pass_rate: f64,
     /// The pass rate reached.
     pub pass_rate: f64,
-    /// `pass_rate >= min_pass_rate`.
+    /// `pass_rate >= min_pass_rate`, or no trial was applicable.
     pub passed: bool,
 }
 
@@ -139,8 +153,11 @@ pub struct Report {
     pub trials: Vec<TrialResult>,
     /// Per evaluator, in the experiment's order.
     pub summary: Vec<EvaluatorSummary>,
-    /// Model tokens.
+    /// Model tokens: the target's and the LLM judges'.
     pub tokens: Tokens,
+    /// The part of `tokens` that LLM judges spent.
+    #[serde(default)]
+    pub judge_tokens: Tokens,
     /// Run latencies.
     pub latency: LatencySummary,
     /// One per evaluator.
@@ -164,12 +181,16 @@ impl Report {
                     .iter()
                     .flat_map(|trial| &trial.scores)
                     .filter(|score| &score.evaluator == evaluator);
-                let (count, passed, sum) =
-                    scores.fold((0, 0, 0.0), |(count, passed, sum), score| {
+                let (count, passed, sum, not_applicable) =
+                    scores.fold((0, 0, 0.0, 0), |(count, passed, sum, na), score| {
+                        if score.not_applicable {
+                            return (count, passed, sum, na + 1);
+                        }
                         (
                             count + 1,
                             passed + usize::from(score.passed),
                             sum + score.value,
+                            na,
                         )
                     });
                 let per = |value: f64| {
@@ -185,6 +206,7 @@ impl Report {
                     passed,
                     pass_rate: per(passed as f64),
                     mean: per(sum),
+                    not_applicable,
                 }
             })
             .collect();
@@ -200,20 +222,26 @@ impl Report {
                     evaluator: summary.evaluator.clone(),
                     min_pass_rate,
                     pass_rate: summary.pass_rate,
-                    passed: summary.pass_rate >= min_pass_rate,
+                    // Nothing applicable to fail.
+                    passed: summary.count == 0 || summary.pass_rate >= min_pass_rate,
                 }
             })
             .collect();
         let mut tokens = Tokens::default();
         for usage in trials.iter().map(|trial| &trial.trial.usage) {
-            let (input, output) = (
-                usage.input_tokens.unwrap_or(0),
-                usage.output_tokens.unwrap_or(0),
-            );
-            tokens.input += input;
-            tokens.output += output;
-            tokens.total += usage.total_tokens.unwrap_or(input + output);
+            add_usage(&mut tokens, usage);
         }
+        let mut judge_tokens = Tokens::default();
+        for usage in trials
+            .iter()
+            .flat_map(|trial| &trial.scores)
+            .filter_map(|score| score.usage.as_ref())
+        {
+            add_usage(&mut judge_tokens, usage);
+        }
+        tokens.input += judge_tokens.input;
+        tokens.output += judge_tokens.output;
+        tokens.total += judge_tokens.total;
         let mut latencies: Vec<Duration> = trials.iter().map(|trial| trial.trial.latency).collect();
         latencies.sort_unstable();
         let latency = LatencySummary {
@@ -226,6 +254,7 @@ impl Report {
             trials,
             summary,
             tokens,
+            judge_tokens,
             latency,
             thresholds,
         }
@@ -254,6 +283,7 @@ impl Report {
     pub fn to_junit(&self) -> String {
         let name = escape(&self.experiment);
         let tests = self.trials.len() + self.thresholds.len();
+        let skipped = self.trials.iter().filter(|trial| trial.skipped()).count();
         let failures = self.trials.iter().filter(|trial| !trial.passed()).count()
             + self
                 .thresholds
@@ -272,7 +302,7 @@ impl Report {
         );
         let _ = writeln!(
             xml,
-            "  <testsuite name=\"{name}\" tests=\"{tests}\" failures=\"{failures}\" errors=\"0\" time=\"{time:.3}\">"
+            "  <testsuite name=\"{name}\" tests=\"{tests}\" failures=\"{failures}\" errors=\"0\" skipped=\"{skipped}\" time=\"{time:.3}\">"
         );
         for result in &self.trials {
             let trial = &result.trial;
@@ -289,7 +319,28 @@ impl Report {
             );
             let failed: Vec<&Score> = result.failures().collect();
             if failed.is_empty() {
-                xml.push_str("/>\n");
+                if result.skipped() {
+                    let why: Vec<String> = result
+                        .scores
+                        .iter()
+                        .filter(|score| score.not_applicable)
+                        .map(|score| {
+                            format!(
+                                "{}: {}",
+                                score.evaluator,
+                                score.explanation.as_deref().unwrap_or("not applicable")
+                            )
+                        })
+                        .collect();
+                    let message = format!("not applicable: {}", why.join("; "));
+                    let _ = write!(
+                        xml,
+                        ">\n      <skipped message=\"{}\"/>\n    </testcase>\n",
+                        escape(&message)
+                    );
+                } else {
+                    xml.push_str("/>\n");
+                }
                 continue;
             }
             let names: Vec<&str> = failed
@@ -349,21 +400,45 @@ impl Report {
         );
         md.push_str("| Evaluator | Pass rate | Threshold | Mean | Passed | Result |\n|---|---|---|---|---|---|\n");
         for (summary, threshold) in self.summary.iter().zip(&self.thresholds) {
+            let applicable = summary.count > 0;
+            let (rate, mean) = if applicable {
+                (
+                    format!("{:.0}%", summary.pass_rate * 100.0),
+                    format!("{:.2}", summary.mean),
+                )
+            } else {
+                ("N/A".to_owned(), "N/A".to_owned())
+            };
+            let not_applicable = if summary.not_applicable > 0 {
+                format!(" ({} N/A)", summary.not_applicable)
+            } else {
+                String::new()
+            };
+            let result = match (applicable, threshold.passed) {
+                (false, _) => "N/A",
+                (true, true) => "pass",
+                (true, false) => "FAIL",
+            };
             let _ = writeln!(
                 md,
-                "| {} | {:.0}% | {:.0}% | {:.2} | {}/{} | {} |",
+                "| {} | {rate} | {:.0}% | {mean} | {}/{}{not_applicable} | {result} |",
                 cell(&summary.evaluator),
-                summary.pass_rate * 100.0,
                 threshold.min_pass_rate * 100.0,
-                summary.mean,
                 summary.passed,
                 summary.count,
-                if threshold.passed { "pass" } else { "FAIL" }
             );
         }
+        let judges = if self.judge_tokens == Tokens::default() {
+            String::new()
+        } else {
+            format!(
+                " Of which LLM judges: {} input, {} output, {} total.",
+                self.judge_tokens.input, self.judge_tokens.output, self.judge_tokens.total
+            )
+        };
         let _ = writeln!(
             md,
-            "\nTokens: {} input, {} output, {} total. Latency: p50 {:?}, p95 {:?}.",
+            "\nTokens: {} input, {} output, {} total.{judges} Latency: p50 {:?}, p95 {:?}.",
             self.tokens.input,
             self.tokens.output,
             self.tokens.total,
@@ -390,6 +465,17 @@ impl Report {
         }
         md
     }
+}
+
+/// Add `usage` to `tokens`; a total not reported is input plus output.
+fn add_usage(tokens: &mut Tokens, usage: &Usage) {
+    let (input, output) = (
+        usage.input_tokens.unwrap_or(0),
+        usage.output_tokens.unwrap_or(0),
+    );
+    tokens.input += input;
+    tokens.output += output;
+    tokens.total += usage.total_tokens.unwrap_or(input + output);
 }
 
 /// The nearest-rank percentile `p` of sorted `values`; zero when empty.
