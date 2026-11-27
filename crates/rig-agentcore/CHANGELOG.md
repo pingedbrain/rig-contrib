@@ -11,8 +11,11 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 - `AgentCoreApp::history_store`, as in rig-a2a and rig-mcp-server: keeps sessions in any
   rig-memory store (`DirStore` on disk, `rig-sqlite`, `rig-postgres`), so they survive a
   restart. The store keeps each session's whole conversation; `history_window` limits only
-  what is sent. Session ids must be 1 to 128 ASCII letters, digits, `-` or `_` (400 otherwise).
-- `rig_agentcore::rig_memory` re-exports rig-memory.
+  what is sent. A session id that is not 1 to 128 ASCII letters, digits, `-` or `_` is
+  hashed into its log name, so any AgentCore session id works. A save that loses a race
+  retries up to 10 times; if it still fails, the answer is returned, the failure is logged,
+  and that turn is not persisted.
+- `rig_agentcore::rig_memory` re-exports rig-memory, so the API follows rig-memory 0.47.x.
 - `examples/serve.rs`: serves the contract locally on `PORT` (default 8080), on a scripted
   model or on OpenRouter when `OPENROUTER_MODEL` and `OPENROUTER_API_KEY` are set.
 

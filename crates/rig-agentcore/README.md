@@ -23,8 +23,11 @@ rig_agentcore::AgentCoreApp::new(agent)
   By default they live in memory (at most 1000 sessions, oldest forgotten first).
   `history_store` keeps them in any [`rig-memory`](https://crates.io/crates/rig-memory)
   store (`DirStore` on disk, `rig-sqlite`, `rig-postgres`), so they survive a restart
-  and several apps can share them. A session id must be 1-128 of `[A-Za-z0-9_-]`, or
-  the invocation is refused with 400 before the agent runs.
+  and several apps can share them. Any session id works: one of 1-128 of `[A-Za-z0-9_-]`
+  names its log as it is, any other is hashed into a safe log name. A save that loses
+  a race with another writer retries up to 10 times; if it still fails, the answer is
+  returned, the failure is logged, and that turn is not persisted. A failed load is an
+  error reported before the agent runs.
   Each invocation sends the newest messages that fit `history_window` (32k tokens by
   default, `rig_memory::recent::TokenBudget`), never splitting a tool call from its
   result. An empty window sends no history. In memory, messages beyond the window are

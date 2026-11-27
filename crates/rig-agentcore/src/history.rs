@@ -7,6 +7,7 @@
 //! on disk, `rig-sqlite`, `rig-postgres`). The store then keeps each
 //! session's whole conversation, so it survives a restart and can be shared
 //! by several apps, while the window still decides what a request sends.
+//! Whatever the session id, its log has a safe name (see [`Persistent`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,22 +17,18 @@ use rig_core::message::Message;
 use rig_core::wasm_compat::{WasmBoxedFuture, WasmCompatSend, WasmCompatSync};
 use rig_memory::recent::{Recent, view};
 use rig_memory::{AsyncStore, SessionError, load_async, save_async};
+use sha2::{Digest, Sha256};
 
-/// The longest session id accepted by a persistent store, so it can name a
-/// file or a row.
-const MAX_SESSION_ID: usize = 128;
-/// How often a save that lost a race with another writer is retried.
-const SAVE_ATTEMPTS: usize = 3;
+/// The longest session id whose own characters name its log. Longer or
+/// other ids are hashed.
+const MAX_LOG_ID: usize = 128;
+/// How often a save that lost a race with another writer is tried in all.
+const SAVE_ATTEMPTS: u32 = 10;
 
 pub(crate) type HistoryError = Box<dyn std::error::Error + Send + Sync>;
 
 /// A store of sessions' conversations by session id.
 pub(crate) trait HistoryStore: WasmCompatSend + WasmCompatSync + 'static {
-    /// Whether `session` can name a conversation in this store.
-    fn accepts(&self, _session: &str) -> bool {
-        true
-    }
-
     /// The messages of `session` the store holds, oldest first; none for a
     /// new one. The caller applies the window.
     fn load<'a>(
@@ -49,12 +46,11 @@ pub(crate) trait HistoryStore: WasmCompatSend + WasmCompatSync + 'static {
     ) -> WasmBoxedFuture<'a, Result<(), HistoryError>>;
 }
 
-/// Whether `session` can name a conversation in a persistent store: 1 to 128
-/// ASCII letters, digits, `-` or `_`. The session id comes from a request
-/// header, and a file store turns it into a path, so nothing else gets through.
-pub(crate) fn valid_session_id(session: &str) -> bool {
+/// Whether `session` can name its log as it is: 1 to 128 ASCII letters,
+/// digits, `-` or `_`, so a file store can use it as a path part.
+fn names_its_log(session: &str) -> bool {
     !session.is_empty()
-        && session.len() <= MAX_SESSION_ID
+        && session.len() <= MAX_LOG_ID
         && session
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
@@ -128,9 +124,19 @@ impl HistoryStore for InMemory {
 pub(crate) struct Persistent<S>(pub(crate) S);
 
 impl<S> Persistent<S> {
-    /// The session log of `session`, kept apart from other sessions in the store.
+    /// The log of `session`, kept apart from other sessions in the store. A
+    /// session id that names its log as it is keeps its characters. Any
+    /// other (AgentCore sends ids of 33 to 256 characters, of anything) is
+    /// hashed, so no id can escape a file store. The two prefixes keep a
+    /// kept id and a hash from ever sharing a name.
     fn log(session: &str) -> String {
-        format!("agentcore-{session}")
+        if names_its_log(session) {
+            format!("agentcore-s-{session}")
+        } else {
+            let digest = Sha256::digest(session.as_bytes());
+            let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+            format!("agentcore-h-{hex}")
+        }
     }
 }
 
@@ -138,10 +144,6 @@ impl<S> HistoryStore for Persistent<S>
 where
     S: AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
 {
-    fn accepts(&self, session: &str) -> bool {
-        valid_session_id(session)
-    }
-
     fn load<'a>(
         &'a self,
         session: &'a str,
@@ -160,20 +162,35 @@ where
     ) -> WasmBoxedFuture<'a, Result<(), HistoryError>> {
         Box::pin(async move {
             let log = Self::log(session);
-            let mut attempt = 1;
-            loop {
+            for attempt in 1..=SAVE_ATTEMPTS {
                 // Another writer may have saved since this one read; the store
                 // then refuses the save whole, so reread and add on top.
                 let mut conversation = load_async(&self.0, &log).await?;
                 conversation.extend(messages.iter().cloned());
                 match save_async(&self.0, &log, &mut conversation).await {
                     Ok(()) => return Ok(()),
-                    Err(SessionError::Changed { .. }) if attempt < SAVE_ATTEMPTS => attempt += 1,
+                    Err(SessionError::Changed { .. }) if attempt < SAVE_ATTEMPTS => {
+                        tokio::time::sleep(backoff(attempt)).await;
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
+            Err(format!("the log {log} changed under {SAVE_ATTEMPTS} saves").into())
         })
     }
+}
+
+/// How long a save waits before its `attempt`-th retry: a few milliseconds,
+/// growing, with a jitter from the clock so writers that collided do not
+/// collide again in step.
+fn backoff(attempt: u32) -> std::time::Duration {
+    let jitter = u64::from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.subsec_nanos())
+            % 8,
+    );
+    std::time::Duration::from_millis(u64::from(attempt) * 2 + jitter)
 }
 
 /// A session id for a call that came without one (outside AgentCore).
@@ -238,11 +255,29 @@ mod tests {
     }
 
     #[test]
-    fn session_ids_that_could_escape_a_file_store_are_refused() {
-        assert!(valid_session_id("019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b"));
-        assert!(valid_session_id("user_42"));
-        for bad in ["", "../etc", "a/b", "a.b", "a b", &"x".repeat(129)] {
-            assert!(!valid_session_id(bad), "{bad:?}");
+    fn every_session_id_names_a_safe_log() {
+        assert_eq!(
+            Persistent::<()>::log("019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b"),
+            "agentcore-s-019a2b3c-4d5e-7f00-8a9b-0c1d2e3f4a5b"
+        );
+        // Escapes, separators and a 256-character id all become a fixed-length hash.
+        for odd in ["../etc", "a/b", "a.b", "a b", &"x".repeat(256)] {
+            let log = Persistent::<()>::log(odd);
+            assert!(log.starts_with("agentcore-h-"), "{odd:?}");
+            assert_eq!(log.len(), "agentcore-h-".len() + 64, "{odd:?}");
+            assert!(
+                log["agentcore-h-".len()..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit()),
+                "{odd:?}"
+            );
         }
+        // A hashed id can never equal a kept one, even one that looks like a hash.
+        assert_eq!(Persistent::<()>::log("h-kept"), "agentcore-s-h-kept");
+        assert_ne!(
+            Persistent::<()>::log("a/b"),
+            Persistent::<()>::log("a_b"),
+            "distinct ids keep distinct logs"
+        );
     }
 }

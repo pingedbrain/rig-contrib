@@ -133,12 +133,18 @@ impl AgentCoreApp {
     /// Keep sessions in `store`, one session log per session id, so they
     /// survive restarts and several apps can share them: any [`rig_memory`]
     /// store, such as `rig_memory::DirStore` (feature `fs`) or the
-    /// `rig-sqlite` and `rig-postgres` stores. Two apps saving one session at
-    /// once do not lose either turn. The store keeps each session's whole
-    /// conversation; [`history_window`](Self::history_window) limits only what
-    /// an invocation sends. A session id must be 1 to 128 ASCII letters,
-    /// digits, `-` or `_`; any other is refused with a 400 before the agent
-    /// runs. Replaces the in-memory store set by [`max_sessions`](Self::max_sessions).
+    /// `rig-sqlite` and `rig-postgres` stores. Any session id works: one that
+    /// is 1 to 128 ASCII letters, digits, `-` or `_` names its log as it is,
+    /// any other is hashed into a safe log name. Two apps, or concurrent
+    /// invocations of one session, saving at once do not lose either turn: a
+    /// save that loses a race rereads and retries up to 10 times with a short
+    /// jittered backoff. If a save still fails, the invocation's answer is
+    /// returned anyway, the failure is logged, and that run's turn is not
+    /// persisted, so later invocations do not see it. A load that fails is
+    /// reported to the caller as an error, before the agent runs. The store
+    /// keeps each session's whole conversation;
+    /// [`history_window`](Self::history_window) limits only what an invocation
+    /// sends. Replaces the in-memory store set by [`max_sessions`](Self::max_sessions).
     #[must_use]
     pub fn history_store<S>(self, store: S) -> Self
     where
@@ -253,12 +259,6 @@ async fn invoke(
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map_or_else(local_id, str::to_owned);
-    if !app.inner.history.accepts(&session) {
-        return error(
-            StatusCode::BAD_REQUEST,
-            "the session id must be 1 to 128 ASCII letters, digits, - or _",
-        );
-    }
     // The invocation is the agent run AgentCore Evaluations looks for: an
     // `invoke_agent` span (Rig adopts it as the run's span, so it makes none
     // of its own), with the prompt and the answer when content is recorded.

@@ -117,14 +117,169 @@ async fn the_window_limits_what_is_sent_and_the_store_keeps_all() {
 }
 
 #[tokio::test]
-async fn a_session_id_a_file_store_could_not_name_is_refused_before_the_run() {
+async fn a_hostile_256_character_session_id_works_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let model = MockCompletionModel::from_turns([MockTurn::text("unused")]);
-    let app =
-        AgentCoreApp::new(AgentBuilder::new(model.clone()).build()).history_store(dir_store(&dir));
+    // AgentCore sends ids of 33 to 256 characters; this one has separators,
+    // traversal and spaces, which a file store must never take as a path.
+    let id: String = format!("../../{}", "a b/c.".repeat(50))
+        .chars()
+        .take(256)
+        .collect();
+    assert_eq!(id.len(), 256);
+
+    let model = MockCompletionModel::from_turns([MockTurn::text("first")]);
+    let app = AgentCoreApp::new(AgentBuilder::new(model).build()).history_store(dir_store(&dir));
+    let url = serve(app).await;
+    let response = invoke(&url, &id, "remember this").await;
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let later_model = MockCompletionModel::from_turns([MockTurn::text("second")]);
+    let later = AgentCoreApp::new(AgentBuilder::new(later_model.clone()).build())
+        .history_store(dir_store(&dir));
+    let url = serve(later).await;
+    invoke(&url, &id, "what did I say?").await;
+    assert!(sent(&later_model, 0).contains("remember this"));
+
+    // Nothing was written outside the store's directory.
+    let parent = dir.path().parent().unwrap();
+    assert!(!parent.join("etc").exists());
+}
+
+#[tokio::test]
+async fn concurrent_invocations_of_one_session_keep_every_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = MockCompletionModel::from_turns((0..5).map(|_| MockTurn::text("ok")));
+    let app = AgentCoreApp::new(AgentBuilder::new(model).build()).history_store(dir_store(&dir));
     let url = serve(app).await;
 
-    let response = invoke(&url, "../escape", "hello").await;
-    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
-    assert!(model.requests().is_empty(), "the model is never called");
+    let (a, b, c, d) = tokio::join!(
+        invoke(&url, "shared-1", "turn A"),
+        invoke(&url, "shared-1", "turn B"),
+        invoke(&url, "shared-1", "turn C"),
+        invoke(&url, "shared-1", "turn D"),
+    );
+    for response in [a, b, c, d] {
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    // A restarted app sees every turn the concurrent invocations saved.
+    let check_model = MockCompletionModel::from_turns([MockTurn::text("ok")]);
+    let check = AgentCoreApp::new(AgentBuilder::new(check_model.clone()).build())
+        .history_store(dir_store(&dir));
+    let url = serve(check).await;
+    invoke(&url, "shared-1", "final").await;
+    let history = sent(&check_model, 0);
+    for turn in ["turn A", "turn B", "turn C", "turn D"] {
+        assert!(history.contains(turn), "{turn} was lost");
+    }
+}
+
+/// A store whose failures are scripted, to test what the app does when the
+/// store fails.
+#[derive(Clone, Copy)]
+enum Fault {
+    /// Reading the log fails.
+    Load,
+    /// Saving fails for good.
+    Save,
+    /// Every save loses a race with another writer.
+    Contention,
+}
+
+#[derive(Clone)]
+struct Faulty(Fault);
+
+impl rig_memory::AsyncStore for Faulty {
+    async fn read_log_async(&self, _name: &str) -> std::io::Result<Vec<u8>> {
+        match self.0 {
+            Fault::Load => Err(std::io::Error::other("secret store internals")),
+            _ => Err(std::io::ErrorKind::NotFound.into()),
+        }
+    }
+
+    async fn append_log_async(
+        &self,
+        _name: &str,
+        _len: u64,
+        _bytes: &[u8],
+    ) -> Result<(), rig_memory::LogWriteError> {
+        Err(self.write_failure())
+    }
+
+    async fn replace_log_async(
+        &self,
+        _name: &str,
+        _len: u64,
+        _bytes: &[u8],
+    ) -> Result<(), rig_memory::LogWriteError> {
+        Err(self.write_failure())
+    }
+
+    async fn read_file_async(&self, _name: &str) -> std::io::Result<Vec<u8>> {
+        Err(std::io::ErrorKind::NotFound.into())
+    }
+
+    async fn write_file_async(&self, _name: &str, _bytes: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::other("secret store internals"))
+    }
+}
+
+impl Faulty {
+    fn write_failure(&self) -> rig_memory::LogWriteError {
+        match self.0 {
+            Fault::Contention => rig_memory::LogWriteError::Changed,
+            _ => rig_memory::LogWriteError::Io(std::io::Error::other("secret store internals")),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_load_failure_is_an_error_that_names_no_internals() {
+    let model = MockCompletionModel::from_turns([MockTurn::text("unused")]);
+    let app = AgentCoreApp::new(AgentBuilder::new(model.clone()).build())
+        .history_store(Faulty(Fault::Load));
+    let url = serve(app).await;
+
+    let response = invoke(&url, "session-1", "hello").await;
+    assert_eq!(
+        response.status(),
+        reqwest::StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let body = response.text().await.unwrap();
+    assert!(body.contains("the conversation could not be loaded"));
+    assert!(!body.contains("secret"));
+    assert!(model.requests().is_empty(), "the agent never runs");
+
+    // Streaming reports the same failure as an event, not a broken stream.
+    let streamed = reqwest::Client::new()
+        .post(format!("{url}/invocations"))
+        .header(SESSION_HEADER, "session-1")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&json!({"prompt": "hello"}))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(streamed.contains("the conversation could not be loaded"));
+    assert!(!streamed.contains("secret"));
+}
+
+#[tokio::test]
+async fn a_save_failure_still_returns_the_answer() {
+    for fault in [Fault::Save, Fault::Contention] {
+        let model = MockCompletionModel::from_turns([MockTurn::text("the answer")]);
+        let app = AgentCoreApp::new(AgentBuilder::new(model.clone()).build())
+            .history_store(Faulty(fault));
+        let url = serve(app).await;
+
+        let reply: Value = invoke(&url, "session-1", "question")
+            .await
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(reply.get("response"), Some(&json!("the answer")));
+        assert_eq!(model.requests().len(), 1);
+    }
 }
