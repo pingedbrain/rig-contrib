@@ -143,6 +143,31 @@ nondeterministic agent. `Report::passed()` is false when any evaluator misses it
 threshold: use it as the exit code. The JUnit report has one test case per trial and per
 threshold, so CI test views show the failures.
 
+## Compare two runs
+
+`Report::compare` takes a baseline report and returns a `Comparison` with the candidate's
+changes: per evaluator, the pass-rate and mean deltas; the cases that regressed (passed in
+the baseline, fail in the candidate) and the fixes; the cases only one run has; and the token
+and latency deltas. Cases are matched by id, and a case passes when all its trials pass.
+`Comparison::to_markdown` and `to_json` render it. A baseline saved with `to_json` loads
+with `serde_json::from_str::<Report>`.
+
+```rust,no_run
+use rig_evals::Report;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let baseline: Report = serde_json::from_str(&std::fs::read_to_string("evals/baseline.json")?)?;
+    let candidate: Report = serde_json::from_str(&std::fs::read_to_string("target/evals/report.json")?)?;
+
+    let comparison = candidate.compare(&baseline);
+    println!("{}", comparison.to_markdown());
+    if !comparison.regressions.is_empty() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+```
+
 ## Timeouts
 
 `trial_timeout(limit)` gives each target run and each evaluator call at most `limit`. A
