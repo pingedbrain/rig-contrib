@@ -22,7 +22,9 @@ pub struct Verdict {
     pub reasoning: String,
 }
 
-/// A judge model scores the answer against a rubric: named `llm_judge`.
+/// A judge model scores the answer against a rubric: named `llm_judge`, or
+/// by a preset ([`helpfulness`](Self::helpfulness), [`faithfulness`](Self::faithfulness),
+/// [`goal_success`](Self::goal_success)).
 ///
 /// The judge sees the rubric, the case's input, expected answer and
 /// assertions (when it has them), the tool calls and the answer, and returns
@@ -31,18 +33,71 @@ pub struct Verdict {
 /// explanation.
 pub struct LlmJudge {
     agent: Agent,
+    name: &'static str,
     rubric: String,
     threshold: f64,
 }
 
+/// The rubric of [`LlmJudge::helpfulness`].
+const HELPFULNESS: &str = "\
+Score how helpful the answer is to the user's input, from 0 to 1.
+- 1: directly and fully does what the user asked, is accurate as far as you can tell, and is clear enough to act on.
+- 0.5: does part of what was asked, or is correct but vague, padded or missing a step the user needs.
+- 0: ignores the request, is wrong, or is empty. An empty or refused answer scores 0 unless refusing is correct for the input.
+Do not reward length or tone on their own.";
+
+/// The rubric of [`LlmJudge::faithfulness`].
+const FAITHFULNESS: &str = "\
+Score whether the answer is faithful to the evidence, from 0 to 1. The evidence is the user's input, the transcript, the tool calls the agent made, the expected answer and the assertions. Tool outputs are not shown, so do not mark a claim unsupported only because its source is not shown.
+- 1: every factual claim in the answer is supported by the evidence.
+- 0.5: most claims are supported, but one claim is unsupported or only partly supported.
+- 0: the answer states facts, figures, names, dates or quotes the evidence does not contain, or contradicts it.
+Do not penalize an answer for leaving things out. An empty or refused answer scores 0 unless refusing is correct for the input.";
+
+/// The rubric of [`LlmJudge::goal_success`].
+const GOAL_SUCCESS: &str = "\
+Score whether the agent achieved the user's goal across the whole conversation, from 0 to 1. The input turns are the user's messages in order, and the transcript holds each turn with the agent's answer. Judge the state at the end of the conversation, using every turn: a goal met early and undone later is not met.
+- 1: by the last turn the user's goal is met, without the user having to repeat or correct themselves.
+- 0.5: the goal is partly met, or met only after the user corrected the agent or asked again.
+- 0: the goal is not met, the agent went off track or gave up, or the answer is empty or refused when refusing is wrong.
+A single-turn case is judged the same way, on its one turn.";
+
 impl LlmJudge {
-    /// A judge running `agent` (the judge model) with `rubric`.
+    /// A judge running `agent` (the judge model) with `rubric`, named
+    /// `llm_judge`.
     pub fn new(agent: Agent, rubric: impl Into<String>) -> Self {
+        Self::named("llm_judge", agent, rubric)
+    }
+
+    fn named(name: &'static str, agent: Agent, rubric: impl Into<String>) -> Self {
         Self {
             agent,
+            name,
             rubric: rubric.into(),
             threshold: 0.5,
         }
+    }
+
+    /// A preset judge named `helpfulness`: whether the answer directly and
+    /// fully does what the user asked, from 0 to 1. Passes at 0.5 unless
+    /// [`threshold`](Self::threshold) sets otherwise.
+    pub fn helpfulness(agent: Agent) -> Self {
+        Self::named("helpfulness", agent, HELPFULNESS)
+    }
+
+    /// A preset judge named `faithfulness`: whether the answer states only
+    /// what the transcript, the tool calls and the case's references support,
+    /// with no invented facts. Tool outputs are not in a trial, so the judge
+    /// sees the tool calls but not their results. Passes at 0.5 unless set.
+    pub fn faithfulness(agent: Agent) -> Self {
+        Self::named("faithfulness", agent, FAITHFULNESS)
+    }
+
+    /// A preset judge named `goal_success`: whether, by the end of the case,
+    /// the agent achieved the user's goal, reading every turn of a multi-turn
+    /// case. Passes at 0.5 unless set.
+    pub fn goal_success(agent: Agent) -> Self {
+        Self::named("goal_success", agent, GOAL_SUCCESS)
     }
 
     /// Pass at `threshold` and above.
@@ -137,7 +192,7 @@ impl AgentHook for Observe {
 
 impl Evaluator for LlmJudge {
     fn name(&self) -> &str {
-        "llm_judge"
+        self.name
     }
 
     fn evaluate<'a>(

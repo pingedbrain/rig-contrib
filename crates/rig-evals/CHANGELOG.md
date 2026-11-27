@@ -20,6 +20,7 @@
 - Judge tokens: an `LlmJudge` records its usage on its score (`Score::usage`), failed judgments
   included. The report's `tokens` now include the judges' tokens (a change to the totals of reports
   with a judge), and `Report::judge_tokens` gives the judges' share.
+- LLM-judge presets: `LlmJudge::helpfulness`, `LlmJudge::faithfulness` and `LlmJudge::goal_success` are judges with a fixed rubric, named `helpfulness`, `faithfulness` and `goal_success`, on the same prompt, score and threshold as `LlmJudge::new` (which is unchanged, still named `llm_judge`).
 - A judge that returns no verdict, or whose reply is cut at `max_tokens`, is a failed score labelled
   `error` (as an evaluator error is), not an `EvalError`. The explanation says the reply was
   truncated at max_tokens when it was.
