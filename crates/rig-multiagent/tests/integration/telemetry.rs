@@ -12,7 +12,22 @@ use serde_json::json;
 
 type Reply = std::pin::Pin<Box<dyn Future<Output = Result<String, NodeError>> + Send>>;
 
+/// Pins a global default (`NoSubscriber`) once per test binary. The dispatch
+/// that `Telemetry::build` registers is live on the test thread before
+/// `set_default` runs, so with only that one registration tracing-core takes
+/// its single-dispatcher path, reads this thread's default (none), and caches
+/// "never" for the callsite. The second live registration turns that path off,
+/// and the global is never dropped, so it stays off for the rest of the binary.
+fn pin_global_default() {
+    static PIN: std::sync::Once = std::sync::Once::new();
+    PIN.call_once(|| {
+        let _ =
+            tracing::subscriber::set_global_default(tracing::subscriber::NoSubscriber::default());
+    });
+}
+
 async fn capture<F: Future<Output = ()>>(body: impl FnOnce() -> F) -> Vec<SpanData> {
+    pin_global_default();
     let spans = InMemorySpanExporter::default();
     let (telemetry, subscriber) = rig_otel::Telemetry::builder()
         .span_exporter(spans.clone())

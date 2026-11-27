@@ -82,6 +82,31 @@ An `Evaluator` scores a trial from 0 to 1 and says whether it passed.
 | `no_error` | the target did not fail |
 | `LlmJudge` | a judge agent scores the answer against a rubric at least at the threshold |
 
+### LLM-judge presets
+
+`LlmJudge::helpfulness`, `LlmJudge::faithfulness` and `LlmJudge::goal_success` are judges
+with a fixed rubric, named `helpfulness`, `faithfulness` and `goal_success`. They share the
+judge's prompt, its 0 to 1 score and its threshold (0.5 unless set). Faithfulness checks the
+answer against the transcript, the tool calls and the case's references; goal success reads
+every turn of a multi-turn case.
+
+```rust,no_run
+# use rig_agent::Agent;
+# use rig_evals::{Dataset, Experiment, LlmJudge};
+# async fn run(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::error::Error>> {
+let report = Experiment::new("support-bot")
+    .dataset(Dataset::load("evals/support.jsonl")?)
+    .target(agent)
+    .evaluator(LlmJudge::helpfulness(judge.clone()))
+    .evaluator(LlmJudge::faithfulness(judge))
+    .threshold("faithfulness", 0.9)
+    .run()
+    .await?;
+# let _ = report;
+# Ok(())
+# }
+```
+
 A failed target run still gets scored, and the built-ins fail it. An evaluator that
 errors (a case without `expected`, a judge without a verdict) gives a failed score
 labelled `error`; the experiment carries on. `named` renames an evaluator, to use two of
