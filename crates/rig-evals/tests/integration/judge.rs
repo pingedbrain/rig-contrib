@@ -288,6 +288,36 @@ async fn goal_success_sends_every_turn_and_parses_the_score() {
     }
 }
 
+/// The default judge on a multi-turn case: every turn is in the prompt, but
+/// the assertion and the answer to grade are the final answer's.
+#[tokio::test]
+async fn the_default_judge_sees_every_turn_and_grades_the_final_answer() {
+    let model = MockCompletionModel::from_turns([MockTurn::text(
+        r#"{"score": 0.2, "reasoning": "No apology in the last answer."}"#,
+    )]);
+    let judge = LlmJudge::new(AgentBuilder::new(model.clone()).build(), "Is it polite?");
+    let case = Case::multi_turn("refund", ["My order arrived broken.", "Refund it."])
+        .assertion("apologizes");
+    let mut trial = Trial::new("refund", 1, "Refund issued.");
+    trial.transcript = vec![
+        Turn::new("My order arrived broken.", "I am sorry about that."),
+        Turn::new("Refund it.", "Refund issued."),
+    ];
+    let score = judge.evaluate(&case, &trial).await.expect("a verdict");
+    assert!(!score.passed);
+
+    let sent = sent(&model);
+    for part in [
+        "User: My order arrived broken.",
+        "Agent: I am sorry about that.",
+        "The answer must satisfy:",
+        "- apologizes",
+        "Answer to grade:",
+    ] {
+        assert!(sent.contains(part), "the prompt lacks {part:?}");
+    }
+}
+
 #[tokio::test]
 async fn presets_keep_the_default_threshold_and_can_be_retuned() {
     let model = MockCompletionModel::from_turns([MockTurn::text(
