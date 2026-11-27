@@ -1,9 +1,11 @@
 //! The README flow end to end: telemetry set up, a conversation with a
 //! session, and a trace that crosses a call to another process.
 //!
-//! The model is scripted, so no API key is needed. The "other process" is a
-//! second agent in this one, reached through HTTP headers, so the trace
-//! crosses the same boundary a real call would.
+//! The model is scripted, so no API key is needed: `MockCompletionModel` from
+//! `rig_core::test_utils` is a test mock. Replace `scripted_agent` with your
+//! real model to trace real calls. The "other process" is a second agent in
+//! this one, reached through HTTP headers, so the trace crosses the same
+//! boundary a real call would.
 //!
 //! Two modes, chosen by `OTEL_EXPORTER_OTLP_ENDPOINT`:
 //!
