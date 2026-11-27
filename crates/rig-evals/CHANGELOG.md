@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- README snippets are compile-checked as doctests (the AgentCore example with the `agentcore` feature).
+
+## 0.47.3 (2026-11-27)
+
 - Multi-turn cases: a case with `turns` (a list of user messages) instead of `input` is sent
   turn by turn on one conversation. The agent target keeps the history between turns, the
   AgentCore target reuses one runtime session, and the evaluators score the last answer with the
@@ -11,7 +15,6 @@
   turn before scoring. Single-turn datasets are unchanged; a case that sets both `input` and
   `turns` is an `ExperimentError::InputAndTurns`. `Case::multi_turn` and `Case::prompts` are new.
 - Example: `cargo run -p rig-evals --example evals` runs a mixed support dataset (N/A where a case has no reference), keyless with scripted models, or on OpenRouter when `OPENROUTER_MODEL` and `OPENROUTER_API_KEY` are both set. It prints the Markdown report and writes JUnit to `target/evals/junit.xml`.
-- README snippets are compile-checked as doctests, so the examples cannot rot.
 - Not applicable: `Score::not_applicable` marks a score the evaluator could not apply (N/A). It is
   left out of pass rates and means, shown as N/A in Markdown, as `not_applicable` in JSON
   (`EvaluatorSummary::not_applicable` counts them) and as a skipped JUnit test case (the

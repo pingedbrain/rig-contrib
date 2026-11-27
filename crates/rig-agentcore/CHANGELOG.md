@@ -5,6 +5,9 @@ Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 ## Unreleased
 
 - README snippets are compile-checked as doctests, so the examples cannot rot.
+
+## 0.47.3 (2026-11-27)
+
 - **Behavior change:** each session keeps only the newest messages that fit
   `history_window` (32,000 tokens by default). Older turns beyond that are no longer
   kept or sent to the model; before, a session grew and sent all of its history.
