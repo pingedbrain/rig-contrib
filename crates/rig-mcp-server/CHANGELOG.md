@@ -4,6 +4,10 @@ Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
+- `McpServer::resource`, `binary_resource` and `prompt` offer fixed resources and prompts
+  (`resources/list`, `resources/read`, `prompts/list`, `prompts/get`). The server
+  advertises those capabilities only when it has some; templates, subscriptions and
+  list-changed notifications are not supported.
 - README snippets are compile-checked as doctests, so the examples cannot rot.
 
 ## 0.47.3 (2026-11-27)
