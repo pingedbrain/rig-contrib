@@ -4,7 +4,7 @@ Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
 ## Unreleased
 
-- Logs no longer print the Rig error text. A failed run, a failed conversation load or save, and a failed typed run log a short `kind` only, because the text can carry provider output or prompt content. No public API or behavior changed.
+- Logs no longer print the Rig error text. A failed run, a failed conversation load or save, and a failed typed run log a short `kind` and a fixed reason, never the error text, because the text can carry provider output or prompt content. No public API or behavior changed.
 - Added push notifications, off by default. `A2aServer::push_notifications(true)` turns them on and the card declares `pushNotifications: true`; `push_config_store(store)` also turns them on; `push_allowed_hosts(hosts)` only limits them. Webhook URLs must be `https` and, if an allowlist is set, on it; the SDK refuses private, loopback and link-local targets, including through DNS and redirects. `allow_unguarded_push_urls()` (local tests only) drops the https and address checks. Push needs a `bearer_token`, or it stays off with an error logged. Caps: 10 configs per task, 10,000 saved per server since start; configs of tasks purged by `terminal_task_limit` are dropped when the total is reached. With push off, a config set is refused with `PushNotificationNotSupported`, as before.
 - Added a test that a second client resubscribes to a running task (`tasks/resubscribe`); it passes with no code change.
 - rig-a2a now depends on `async-trait` directly (it was optional under `otel`).

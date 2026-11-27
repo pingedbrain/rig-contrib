@@ -181,7 +181,15 @@ impl McpServer {
                     .retries(2)
                     .await
                     .map_err(|error| {
-                        tracing::warn!(kind = "run_failed", "typed agent call failed");
+                        let reason = match &error {
+                            StructuredOutputError::Prompt(prompt) => status_message(prompt),
+                            _ => "not a structured answer",
+                        };
+                        tracing::warn!(
+                            kind = "run_failed",
+                            reason = reason,
+                            "typed agent call failed"
+                        );
                         match &error {
                             StructuredOutputError::Prompt(prompt) => {
                                 failure_message(prompt).into_owned()
@@ -748,7 +756,7 @@ impl Handler {
                 }
                 Ok(_) => {}
                 Err(failure) => {
-                    tracing::warn!(parent: &span, kind = "run_failed", "agent call failed");
+                    tracing::warn!(parent: &span, kind = "run_failed", reason = status_message(&failure), "agent call failed");
                     return Ok(error(&failure_message(&failure)));
                 }
             }

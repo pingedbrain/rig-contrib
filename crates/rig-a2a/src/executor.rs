@@ -117,7 +117,15 @@ impl A2aExecutor {
                     .retries(2)
                     .await
                     .map_err(|error| {
-                        tracing::warn!(kind = "run_failed", "A2A typed task failed");
+                        let reason = match &error {
+                            StructuredOutputError::Prompt(prompt) => status_message(prompt),
+                            _ => "not a structured answer",
+                        };
+                        tracing::warn!(
+                            kind = "run_failed",
+                            reason = reason,
+                            "A2A typed task failed"
+                        );
                         match &error {
                             StructuredOutputError::Prompt(prompt) => {
                                 failure_message(prompt).into_owned()
@@ -361,7 +369,7 @@ fn run(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    tracing::warn!(parent: &span, kind = "run_failed", "A2A task failed");
+                    tracing::warn!(parent: &span, kind = "run_failed", reason = status_message(&error), "A2A task failed");
                     end("failed");
                     yield Ok(ids.status(TaskState::Failed, Some(ids.agent_message(failure_message(&error).into_owned()))));
                     return;
