@@ -72,7 +72,8 @@ pub use evaluator::{EvalError, Evaluator, Named, Score};
 pub use evaluators::{LlmJudge, Verdict};
 pub use experiment::{Experiment, ExperimentError};
 pub use report::{
-    EvaluatorSummary, LatencySummary, Report, ThresholdResult, Tokens, Trial, TrialResult,
+    CaseChange, Comparison, EvaluatorDelta, EvaluatorSummary, LatencySummary, Report,
+    ThresholdResult, Tokens, Trial, TrialResult,
 };
 pub use sink::{JsonFile, JunitFile, Markdown, Sink, SinkError};
 pub use target::{
