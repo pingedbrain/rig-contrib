@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 
 use rig_agent::Agent;
 use rig_core::conversation::pairing::safe_start;
@@ -292,7 +292,7 @@ enum SummarizeError {
 const PROBE: &str = "\u{1}";
 
 /// The text every summary message opens with: rig-memory's frame, before the summary.
-fn summary_opening() -> String {
+static OPENING: LazyLock<String> = LazyLock::new(|| {
     SummaryState {
         summary: PROBE.to_owned(),
         ..SummaryState::default()
@@ -303,17 +303,16 @@ fn summary_opening() -> String {
     .next()
     .unwrap_or_default()
     .to_owned()
-}
+});
 
 /// Whether `message` is a summary this module wrote (or rig-memory's splice did).
 pub(crate) fn is_summary(message: &Message) -> bool {
     let Message::User { content } = message else {
         return false;
     };
-    let opening = summary_opening();
     matches!(
         content.first(),
-        Some(UserContent::Text(text)) if text.text.starts_with(&opening)
+        Some(UserContent::Text(text)) if text.text.starts_with(OPENING.as_str())
     )
 }
 

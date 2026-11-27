@@ -187,6 +187,9 @@ impl AgentCoreApp {
     ///
     /// The summary is always sent first, before the messages the window keeps,
     /// even when the window is narrower than the summary and the kept messages.
+    /// In a session this option summarizes, a first message that opens with
+    /// rig-memory's summary frame text is treated as the summary, even if a
+    /// caller wrote it.
     /// `summarizer` should be an agent without tools: a tool call in its reply
     /// is not used. `trigger_messages` is raised to `keep_recent + 1` when it is
     /// not larger, since a cut needs something older than the kept messages.
@@ -371,7 +374,7 @@ async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, Histor
     // the messages after it, so a narrow window cannot drop it.
     let mut sent = Vec::new();
     let rest = match messages.split_first() {
-        Some((first, rest)) if is_summary(first) => {
+        Some((first, rest)) if inner.summarizing.is_some() && is_summary(first) => {
             sent.push((**first).clone());
             rest
         }
