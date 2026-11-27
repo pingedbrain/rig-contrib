@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.47.3 (2026-11-27)
 
 - Multi-turn cases: a case with `turns` (a list of user messages) instead of `input` is sent
   turn by turn on one conversation. The agent target keeps the history between turns, the
