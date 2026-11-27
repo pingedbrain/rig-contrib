@@ -70,3 +70,90 @@ fn load_picks_the_format_by_extension() {
         Err(DatasetError::Read { .. })
     ));
 }
+
+#[test]
+fn a_repeated_id_loads_with_every_case() {
+    // Loading stays permissive (a warning names both places); the experiment
+    // is the gate, so the existing refusal still holds.
+    let dataset = Dataset::from_jsonl(
+        "{\"id\": \"a\", \"input\": \"1\"}\n{\"id\": \"b\", \"input\": \"2\"}\n{\"id\": \"a\", \"input\": \"3\"}\n",
+    )
+    .expect("a repeated id is not a parse error");
+    let ids: Vec<&str> = dataset.cases.iter().map(|case| case.id.as_str()).collect();
+    assert_eq!(ids, ["a", "b", "a"]);
+
+    let dataset = Dataset::from_json(r#"[{"id": "a", "input": "1"}, {"id": "a", "input": "2"}]"#)
+        .expect("a repeated id is not a parse error");
+    assert_eq!(dataset.cases.len(), 2);
+}
+
+#[test]
+fn a_bad_jsonl_line_is_named_with_the_path_and_line() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad.jsonl");
+    std::fs::write(
+        &path,
+        "{\"id\": \"a\", \"input\": \"1\"}\n\n{\"id\": \"b\", \"input\": \"2\"}\n{\"id\": \"c\", \"input\": \"x\", \"turns\": [\"y\"]}\n",
+    )
+    .expect("write");
+
+    let error = Dataset::load_named(&path).expect_err("line 4 sets both input and turns");
+    let message = error.to_string();
+    assert!(
+        message.contains(&path.display().to_string()),
+        "no path in {message:?}"
+    );
+    assert!(message.contains("line 4"), "no line 4 in {message:?}");
+    assert!(
+        matches!(&error, DatasetError::InFile { source, .. }
+            if matches!(**source, DatasetError::Line { line: 4, .. })),
+        "{error:?}"
+    );
+
+    // load keeps its plain error: a bare Line, as before.
+    assert!(matches!(
+        Dataset::load(&path),
+        Err(DatasetError::Line { line: 4, .. })
+    ));
+}
+
+#[test]
+fn a_bad_json_array_element_is_named_with_its_index_and_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("bad.json");
+    std::fs::write(
+        &path,
+        r#"[{"id": "a", "input": "1"}, {"id": "b"}, {"id": "c", "input": "3"}]"#,
+    )
+    .expect("write");
+
+    let error = Dataset::load_named(&path).expect_err("element 1 has no input");
+    let message = error.to_string();
+    assert!(
+        message.contains(&path.display().to_string()),
+        "no path in {message:?}"
+    );
+    assert!(message.contains("index 1"), "no index 1 in {message:?}");
+
+    // load and from_json keep their plain Json error, unchanged.
+    assert!(matches!(Dataset::load(&path), Err(DatasetError::Json(_))));
+    assert!(matches!(
+        Dataset::from_json(r#"[{"id": "a", "input": "1"}, 7]"#),
+        Err(DatasetError::Json(_))
+    ));
+}
+
+#[test]
+fn a_malformed_json_file_names_the_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("broken.json");
+    std::fs::write(&path, "{\"id\": \"a\"}").expect("write");
+
+    let message = Dataset::load_named(&path)
+        .expect_err("an object, not an array")
+        .to_string();
+    assert!(
+        message.contains(&path.display().to_string()),
+        "no path in {message:?}"
+    );
+}

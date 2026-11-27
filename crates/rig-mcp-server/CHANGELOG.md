@@ -6,6 +6,7 @@ Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
 - Examples `typed_tool` and `mcp_echo_server` print one line on failure (`error: could not listen on
   127.0.0.1:3400: ...`, or the `PORT` value that is not a number) instead of Rust's `Debug` output.
+- Docs: the front page shows serving over Streamable HTTP with a bearer token and how an HTTP client connects; the README shows the Claude Code HTTP command and where content recording is set.
 - Agents that hit their turn limit now say how to raise it: the error result names `AgentBuilder::default_max_turns(n)`. Error variants and statuses are unchanged.
 - `McpServer::resource`, `binary_resource` and `prompt` offer fixed resources and prompts
   (`resources/list`, `resources/read`, `prompts/list`, `prompts/get`). The server

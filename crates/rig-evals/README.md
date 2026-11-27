@@ -28,16 +28,34 @@ async fn support_bot(agent: Agent, judge: Agent) -> Result<(), Box<dyn std::erro
 
 ## Cases
 
-A case has an `id`, an `input`, and the references evaluators check a run against: an
-`expected` answer, an expected `trajectory` of tool calls, and `assertions` in plain
-language. These are the reference inputs of AWS Bedrock AgentCore evaluations and the
-fields of Strands Evals' cases. `Dataset::load` reads `.json` (an array) or `.jsonl`.
+A dataset is a `.jsonl` file (one case per line) or a `.json` array; `Dataset::load` reads
+both by extension. A case has an `id` and one of two prompt fields. The other fields are
+the references evaluators check a run against. They are the reference inputs of AWS Bedrock
+AgentCore evaluations and the fields of Strands Evals' cases.
+`Dataset::load_named` reads the same files and names the path and line or index of a bad
+case in its error.
 
-```json
-{"id": "refund", "input": "Order 7 arrived broken.", "expected": "A refund was issued.",
- "trajectory": [{"name": "lookup_order", "args": {"id": 7}}, {"name": "refund"}],
- "assertions": ["apologizes", "gives the refund amount"]}
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | string, required | names the case in reports; unique within a dataset |
+| `input` | string | the prompt of a single-turn case |
+| `turns` | array of strings | the user messages of a multi-turn case, sent in order; instead of `input` |
+| `expected` | string | the expected answer |
+| `trajectory` | array of `{"name", "args"}` | the tool calls expected, in order; `args` is optional and matched as a subset. The `trajectory` evaluator sets how strictly they match |
+| `assertions` | array of strings | statements the answer must satisfy, in plain language |
+| `metadata` | object | anything else, kept in reports |
+
+A three-case file, one single-turn case with references, one minimal case, and one
+multi-turn case:
+
+```jsonl
+{"id": "refund", "input": "Order 7 arrived broken.", "expected": "A refund was issued.", "trajectory": [{"name": "lookup_order", "args": {"id": 7}}, {"name": "refund"}], "assertions": ["apologizes"]}
+{"id": "hours", "input": "What are your opening hours?", "expected": "We are open 9 to 5.", "assertions": ["gives the hours"]}
+{"id": "city", "turns": ["My favourite city is Lisbon.", "What is my favourite city?"], "expected": "Lisbon"}
 ```
+
+Case ids are unique within a dataset. Loading a dataset that repeats an id logs a warning
+naming both places; `Experiment::run` then refuses the dataset with `DuplicateCase`.
 
 ### Multi-turn cases
 
@@ -166,6 +184,9 @@ semantic conventions (development status). The crate only emits `tracing` data; 
 [rig-otel](https://crates.io/crates/rig-otel) installed, any OTel backend shows the results on the evaluated
 run's trace.
 
+The evaluated agent's prompts and replies reach these traces only when it records content
+(`AgentBuilder::record_content_telemetry(true)`); it is off by default.
+
 ## Providers
 
 ### AWS Bedrock AgentCore
@@ -214,7 +235,7 @@ async fn agentcore_eval() -> Result<(), Box<dyn std::error::Error>> {
 
 The agent must leave spans AgentCore Evaluations can read: deploy it with
 [rig-agentcore](https://crates.io/crates/rig-agentcore), export with [rig-otel](https://crates.io/crates/rig-otel)'s `aws` feature,
-and record content (`record_content(true)`), so the spans carry the prompts and answers.
+and record content (`AgentCoreApp::record_content(true)`), so the spans carry the prompts and answers.
 Transaction Search must be on in the account.
 
 The caller needs `bedrock-agentcore:InvokeAgentRuntime` on the runtime,

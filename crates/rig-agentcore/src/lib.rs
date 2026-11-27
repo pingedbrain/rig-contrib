@@ -18,10 +18,17 @@
 //!   [`AgentCoreApp::spawn_task`] is open, so AgentCore Runtime keeps the
 //!   session running until that work ends.
 //!
+//! - prompts and replies go on the spans only with
+//!   [`AgentCoreApp::record_content`] (off by default, as in Rig). AgentCore
+//!   Evaluations needs them to judge a session.
+//!
 //! ```no_run
-//! # async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
-//! rig_agentcore::AgentCoreApp::new(agent).serve().await
-//! # }
+//! async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
+//!     rig_agentcore::AgentCoreApp::new(agent)
+//!         .record_content(true)
+//!         .serve()
+//!         .await
+//! }
 //! ```
 
 #![forbid(unsafe_code)]

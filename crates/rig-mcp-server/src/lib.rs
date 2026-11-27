@@ -13,12 +13,34 @@
 //! Built on the official MCP Rust SDK, [`rmcp`].
 //!
 //! ```no_run
-//! use rig_mcp_server::McpServer;
-//! # async fn run(agent: rig_agent::Agent) -> Result<(), rig_mcp_server::ServeError> {
-//! // A local client launches this binary and talks to it over stdio.
-//! McpServer::new("my-agents").agent(agent).serve_stdio().await
-//! # }
+//! use rig_mcp_server::{McpServer, ServeError};
+//!
+//! async fn serve(agent: rig_agent::Agent) -> Result<(), ServeError> {
+//!     // A local client launches this binary and talks to it over stdio.
+//!     McpServer::new("my-agents").agent(agent).serve_stdio().await
+//! }
 //! ```
+//!
+//! Over Streamable HTTP the same server answers at `/mcp`. With a bearer token,
+//! calls without it get HTTP 401:
+//!
+//! ```no_run
+//! use rig_mcp_server::McpServer;
+//!
+//! async fn serve_http(server: McpServer, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+//!     let app = server.bearer_token(token).into_router()?;
+//!     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await?;
+//!     rig_mcp_server::axum::serve(listener, app).await?;
+//!     Ok(())
+//! }
+//! ```
+//!
+//! An HTTP client connects to `http://127.0.0.1:3000/mcp` and sends the token on
+//! every request, as `Authorization: Bearer <token>`. For Claude Code:
+//! `claude mcp add --transport http my-agents http://127.0.0.1:3000/mcp --header "Authorization: Bearer <token>"`.
+//!
+//! Prompts and replies go on the trace only when the agent records them, with
+//! `AgentBuilder::record_content_telemetry(true)`. It is off by default, as in Rig.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

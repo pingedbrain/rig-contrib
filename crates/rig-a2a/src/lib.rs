@@ -18,15 +18,47 @@
 //! use rig_a2a::A2aServer;
 //! use rig_agent::AgentBuilder;
 //! use rig_core::providers::openai::{self, OpenAI};
-//! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
-//! let model = OpenAI::from_env()?.completion(openai::GPT_5_4_MINI);
-//! let agent = AgentBuilder::new(model).name("helper").build();
-//! let app = A2aServer::new(agent, "http://localhost:3000").into_router();
-//! let listener = tokio::net::TcpListener::bind("localhost:3000").await?;
-//! rig_a2a::axum::serve(listener, app).await?;
-//! # Ok(())
-//! # }
+//!
+//! async fn serve() -> Result<(), Box<dyn std::error::Error>> {
+//!     let model = OpenAI::from_env()?.completion(openai::GPT_5_4_MINI);
+//!     let agent = AgentBuilder::new(model).name("helper").build();
+//!     let app = A2aServer::new(agent, "http://localhost:3000").into_router();
+//!     let listener = tokio::net::TcpListener::bind("localhost:3000").await?;
+//!     rig_a2a::axum::serve(listener, app).await?;
+//!     Ok(())
+//! }
 //! ```
+//!
+//! `examples/a2a_serve.rs` runs this with a model from the environment.
+//!
+//! Ask a remote A2A agent directly, or give it to a model as a tool:
+//!
+//! ```no_run
+//! use rig_a2a::RemoteAgent;
+//!
+//! async fn ask(question: &str) -> Result<String, Box<dyn std::error::Error>> {
+//!     let remote = RemoteAgent::connect("http://127.0.0.1:3000").await?;
+//!     let reply = remote.send(question, None).await?;
+//!     Ok(reply.text)
+//! }
+//! ```
+//!
+//! ```no_run
+//! use rig_a2a::RemoteAgent;
+//! use rig_agent::AgentBuilder;
+//!
+//! async fn as_tool(builder: AgentBuilder) -> Result<rig_agent::Agent, Box<dyn std::error::Error>> {
+//!     let remote = RemoteAgent::connect("http://127.0.0.1:3000").await?;
+//!     // One turn is the default, so allow the tool call and the answer.
+//!     Ok(builder.dynamic_tool(remote.into_tool()?).default_max_turns(4).build())
+//! }
+//! ```
+//!
+//! `examples/call.rs` streams an answer from any A2A agent, and
+//! `examples/remote_tool.rs` runs the tool case end to end.
+//!
+//! Prompts and replies go on the trace only when the agent records them, with
+//! `AgentBuilder::record_content_telemetry(true)`. It is off by default, as in Rig.
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(

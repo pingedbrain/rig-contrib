@@ -2,13 +2,26 @@
 //! sees it, and a resumed run must be given it again. Scripted models, no
 //! network.
 
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rig_agent::AgentBuilder;
 use rig_core::test_utils::{MockCompletionModel, MockTurn};
 use rig_memory::MemoryStore;
-use rig_multiagent::{Graph, GraphState, NodeError, RunState, node_fn, node_fn_with_state};
+use rig_multiagent::{
+    Graph, GraphRun, GraphState, NodeError, RunState, node_fn, node_fn_with_state,
+};
+
+/// Compile-time check: the run types keep the auto traits that callers rely on
+/// to hold them across `catch_unwind` and move them between tasks.
+#[test]
+fn run_types_keep_their_auto_traits() {
+    fn assert_auto_traits<T: UnwindSafe + RefUnwindSafe + Send + Sync>() {}
+    assert_auto_traits::<RunState>();
+    assert_auto_traits::<GraphState>();
+    assert_auto_traits::<GraphRun>();
+}
 
 const SECRET: &str = "tenant-secret-9f2";
 
