@@ -203,28 +203,59 @@ impl<S: TaskStore> A2aServer<S> {
     }
 
     /// Accept push notification configs, so a client can ask the server to
-    /// POST task updates to a webhook. Off by default. When on, the card
-    /// declares `pushNotifications: true`; when off, setting a config is
-    /// refused with `PushNotificationNotSupported`. The v0.3 card under
-    /// [`V03_PATH`](crate::V03_PATH) still declares `false`.
+    /// POST task updates to a webhook. Off by default.
+    ///
+    /// Push needs [`bearer_token`](Self::bearer_token): without one, the
+    /// server logs an error when it is built and keeps push off, so the card
+    /// says `pushNotifications: false` and a config set is refused with
+    /// `PushNotificationNotSupported`. With push on, the card declares
+    /// `pushNotifications: true`.
     ///
     /// Configs are kept in memory unless [`push_config_store`](Self::push_config_store)
-    /// is set. Every webhook URL is checked when its config is saved: it must
-    /// be `https`, and on the list from [`push_allowed_hosts`](Self::push_allowed_hosts)
-    /// if one is set. The SDK then refuses to POST to loopback, private and
-    /// link-local addresses, including names that resolve to them and
-    /// redirects to them.
+    /// is set. At most 10 configs per task and 10,000 in all are accepted.
+    /// Each config is checked when it is saved: its URL must be `https`, on
+    /// the list from [`push_allowed_hosts`](Self::push_allowed_hosts) if one
+    /// is set, and not a literal IP in 100.64.0.0/10, 64:ff9b::/96, 2002::/16
+    /// or ::a.b.c.d/96.
+    ///
+    /// The SDK's address guard runs when a webhook is called. It refuses
+    /// 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16,
+    /// 224.0.0.0/4, 0.0.0.0, ::1, ::, fc00::/7, fe80::/10, ff00::/8, the
+    /// IPv4-mapped forms of those IPv4 ranges, and the hosts `localhost`,
+    /// `metadata.google.internal` and `metadata.azure.com`. It checks the
+    /// address a name resolves to, and each redirect. It does not cover the
+    /// ranges listed above, so a name resolving to them is not refused.
+    /// Redirects are followed only to hosts that pass the same check.
     ///
     /// # Security
     ///
-    /// A webhook URL comes from the client, so an open server with push on
-    /// lets any caller make it POST to any public host. Set an allowlist when
-    /// clients are not trusted. The bearer token is not sent to a webhook.
+    /// - A webhook URL comes from the client. An open server with push on
+    ///   lets any caller make it POST to any host the guard allows. Set an
+    ///   allowlist when clients are not trusted.
+    /// - The server signs nothing: there is no JWT or JWKS. It forwards the
+    ///   client's `token` as the `A2A-Notification-Token` header and its
+    ///   `authentication` credentials as `Authorization`. A receiver must
+    ///   check both itself.
+    /// - Each POST carries the full task update, including the agent's
+    ///   output and any artifacts.
+    /// - Anyone who holds a task id can attach a webhook to it, and so
+    ///   receive that task's updates. Push requires a bearer token for this
+    ///   reason, and the bearer token is the only check on who may do so.
+    /// - A slow webhook delays the task. Delivery runs in the task's event
+    ///   loop, one config at a time, and each POST has a 5 second timeout. A
+    ///   task with 10 configs whose receivers all stall can take up to 50
+    ///   seconds per update, and the client's stream waits for it.
+    /// - Each task holds up to 10 configs and the server up to 10,000, so
+    ///   configs outlive a finished task. Set
+    ///   [`terminal_task_limit`](Self::terminal_task_limit) too, so finished
+    ///   tasks, and their configs, are purged.
     ///
     /// ```ignore
     /// let server = A2aServer::new(agent, "https://agent.example.com")
+    ///     .bearer_token(token)
     ///     .push_notifications(true)
-    ///     .push_allowed_hosts(["hooks.example.com"]);
+    ///     .push_allowed_hosts(["hooks.example.com"])
+    ///     .terminal_task_limit(1_000);
     /// ```
     #[must_use]
     pub fn push_notifications(mut self, enabled: bool) -> Self {
@@ -235,7 +266,7 @@ impl<S: TaskStore> A2aServer<S> {
 
     /// Keep push configs in `store` instead of in memory. Also turns push
     /// notifications on, as [`push_notifications(true)`](Self::push_notifications)
-    /// does. Every config still goes through the URL checks.
+    /// does. Every config still goes through the URL checks and the caps.
     #[must_use]
     pub fn push_config_store<P: PushConfigStore>(mut self, store: P) -> Self {
         self.push.store = Some(Arc::new(store));
@@ -255,13 +286,15 @@ impl<S: TaskStore> A2aServer<S> {
         self
     }
 
-    /// Accept `http://` webhook URLs and let the server POST to loopback and
-    /// private addresses. For tests against a webhook on this machine. It
-    /// turns off the checks described on [`push_notifications`](Self::push_notifications),
-    /// so do not use it on a server that faces other people.
+    /// Drop the checks that keep a webhook URL from reaching a private
+    /// target: the `https` requirement and the SDK's address guard (loopback,
+    /// private and link-local addresses, DNS and redirects). Also lets the
+    /// SDK send webhooks through the proxies named in the environment. For
+    /// tests against a webhook on this machine only. The host allowlist still
+    /// applies.
     #[must_use]
-    pub fn allow_insecure_push_urls(mut self) -> Self {
-        self.push.allow_insecure = true;
+    pub fn allow_unguarded_push_urls(mut self) -> Self {
+        self.push.allow_unguarded = true;
         self
     }
 
@@ -290,16 +323,25 @@ impl<S: TaskStore> A2aServer<S> {
 
     /// The Axum router serving the card and both bindings.
     pub fn into_router(self) -> axum::Router {
+        let mut card = self.card;
+        // Push needs a bearer token; without one it stays off and the card says so.
+        let push_on = self.push.enabled && self.bearer.is_some();
+        if self.push.enabled && !push_on {
+            tracing::error!(
+                "push notifications need a bearer_token on the A2aServer; push stays off"
+            );
+        }
+        card.capabilities.push_notifications = Some(push_on);
         let mut handler = DefaultRequestHandler::new(self.executor, self.store)
-            .with_capabilities(self.card.capabilities.clone())
-            .with_default_input_modes(self.card.default_input_modes.clone());
-        if self.push.enabled {
+            .with_capabilities(card.capabilities.clone())
+            .with_default_input_modes(card.default_input_modes.clone());
+        if push_on {
             handler =
                 handler.with_push_notifications(self.push.checked_store(), self.push.sender());
         }
         let handler = Arc::new(handler);
         let v03_card = v03::card(
-            &self.card,
+            &card,
             &format!("{}{V03_PATH}", self.url),
             self.bearer.is_some(),
         );
@@ -316,7 +358,7 @@ impl<S: TaskStore> A2aServer<S> {
             ));
         // The cards are routed after the guard, so discovery needs no token.
         calls
-            .merge(agent_card_router(Arc::new(StaticAgentCard::new(self.card))))
+            .merge(agent_card_router(Arc::new(StaticAgentCard::new(card))))
             .route(
                 &format!("{V03_PATH}{}", a2a_server::WELL_KNOWN_AGENT_CARD_PATH),
                 axum::routing::get(move || async move { axum::Json(v03_card) }),

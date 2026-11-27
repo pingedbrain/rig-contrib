@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use a2a_client::agent_card::AgentCardResolver;
+use a2a_client::auth::AuthInterceptor;
+use a2a_client::{A2AClient, A2AClientFactory, Transport};
 use anyhow::{Context, ensure};
 use futures::StreamExt;
 use rig_a2a::A2aServer;
@@ -22,6 +24,8 @@ use tokio::sync::{Notify, mpsc};
 
 use super::serve::{MockControlledTool, connect, reply, request, serve};
 
+const TOKEN: &str = "push-token";
+
 /// Serve `agent` on a free loopback port with `configure` applied; returns its base URL.
 async fn serve_with(
     agent: Agent,
@@ -32,6 +36,16 @@ async fn serve_with(
     let app = configure(A2aServer::new(agent, &url)).into_router();
     tokio::spawn(async move { rig_a2a::axum::serve(listener, app).await });
     Ok(url)
+}
+
+/// A client that sends the bearer token on every call.
+async fn connect_bearer(url: &str) -> anyhow::Result<A2AClient<Box<dyn Transport>>> {
+    let card = AgentCardResolver::new(None).resolve(url).await?;
+    let factory = A2AClientFactory::builder()
+        .preferred_bindings(vec![TRANSPORT_PROTOCOL_JSONRPC.to_owned()])
+        .with_interceptor(Arc::new(AuthInterceptor::bearer(TOKEN)))
+        .build();
+    Ok(factory.create_from_card(&card).await?)
 }
 
 /// A local webhook: each POST body it receives is sent on the returned channel.
@@ -80,13 +94,37 @@ async fn the_card_declares_push_only_when_it_is_on() -> anyhow::Result<()> {
     );
 
     let on = serve_with(AgentBuilder::new(no_turns()).name("echo").build(), |s| {
-        s.push_notifications(true)
+        s.bearer_token(TOKEN).push_notifications(true)
     })
     .await?;
     let card = AgentCardResolver::new(None).resolve(&on).await?;
     ensure!(
         card.capabilities.push_notifications == Some(true),
         "{card:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn push_without_a_bearer_token_stays_off() -> anyhow::Result<()> {
+    let url = serve_with(AgentBuilder::new(no_turns()).name("echo").build(), |s| {
+        s.push_notifications(true)
+    })
+    .await?;
+    let card = AgentCardResolver::new(None).resolve(&url).await?;
+    ensure!(
+        card.capabilities.push_notifications == Some(false),
+        "{card:?}"
+    );
+    let client = connect(&url, TRANSPORT_PROTOCOL_JSONRPC).await?;
+    let error = client
+        .create_push_config(&config("task-1", "https://hooks.example.com/a"))
+        .await
+        .err()
+        .context("set-config is refused without a bearer token")?;
+    ensure!(
+        error.code == error_code::PUSH_NOTIFICATION_NOT_SUPPORTED,
+        "{error:?}"
     );
     Ok(())
 }
@@ -99,10 +137,12 @@ async fn push_configs_deliver_task_updates_to_a_webhook() -> anyhow::Result<()> 
         .build();
     // The webhook is on loopback, so the test opts out of the address guard.
     let url = serve_with(agent, |s| {
-        s.push_notifications(true).allow_insecure_push_urls()
+        s.bearer_token(TOKEN)
+            .push_notifications(true)
+            .allow_unguarded_push_urls()
     })
     .await?;
-    let client = connect(&url, TRANSPORT_PROTOCOL_JSONRPC).await?;
+    let client = connect_bearer(&url).await?;
 
     // The config rides on the send, so it is saved against the task it creates.
     let mut send = request("Hi", None);
@@ -157,16 +197,19 @@ async fn set_config_is_refused_when_push_is_off() -> anyhow::Result<()> {
 #[tokio::test]
 async fn webhook_urls_are_checked_when_saved() -> anyhow::Result<()> {
     let url = serve_with(AgentBuilder::new(no_turns()).name("echo").build(), |s| {
-        s.push_notifications(true)
+        s.bearer_token(TOKEN)
+            .push_notifications(true)
             .push_allowed_hosts(["hooks.example.com"])
     })
     .await?;
-    let client = connect(&url, TRANSPORT_PROTOCOL_JSONRPC).await?;
+    let client = connect_bearer(&url).await?;
 
     for refused in [
         "http://hooks.example.com/a",
         "ftp://hooks.example.com/a",
         "https://evil.example.net/a",
+        "https://100.64.0.1/a",
+        "https://[64:ff9b::808:808]/a",
     ] {
         let error = client
             .create_push_config(&config("task-1", refused))
@@ -181,6 +224,31 @@ async fn webhook_urls_are_checked_when_saved() -> anyhow::Result<()> {
     // Hosts compare without regard to case.
     client
         .create_push_config(&config("task-1", "https://Hooks.Example.com/a"))
+        .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_task_holds_at_most_ten_configs() -> anyhow::Result<()> {
+    let url = serve_with(AgentBuilder::new(no_turns()).name("echo").build(), |s| {
+        s.bearer_token(TOKEN).push_notifications(true)
+    })
+    .await?;
+    let client = connect_bearer(&url).await?;
+    for n in 0..10 {
+        client
+            .create_push_config(&config("task-1", &format!("https://hooks.example.com/{n}")))
+            .await?;
+    }
+    let error = client
+        .create_push_config(&config("task-1", "https://hooks.example.com/11"))
+        .await
+        .err()
+        .context("an eleventh config on one task is refused")?;
+    ensure!(error.code == error_code::INVALID_PARAMS, "{error:?}");
+    // Another task has its own allowance.
+    client
+        .create_push_config(&config("task-2", "https://hooks.example.com/a"))
         .await?;
     Ok(())
 }
