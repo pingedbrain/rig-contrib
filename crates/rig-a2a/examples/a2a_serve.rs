@@ -16,6 +16,9 @@
 //!   "params":{"message":{"messageId":"m1","role":"ROLE_USER","parts":[{"text":"Hi!"}]}}}'
 //! ```
 
+use std::process::ExitCode;
+
+use anyhow::Context as _;
 use rig_a2a::A2aServer;
 use rig_agent::AgentBuilder;
 use rig_core::providers::openai::{self, OpenAI};
@@ -23,7 +26,17 @@ use rig_core::providers::openai::{self, OpenAI};
 const URL: &str = "http://localhost:3000";
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
@@ -36,7 +49,9 @@ async fn main() -> anyhow::Result<()> {
         .build();
 
     let app = A2aServer::new(agent, URL).into_router();
-    let listener = tokio::net::TcpListener::bind("localhost:3000").await?;
+    let listener = tokio::net::TcpListener::bind("localhost:3000")
+        .await
+        .with_context(|| "could not listen on localhost:3000")?;
     println!("Serving the agent card at {URL}/.well-known/agent-card.json");
     rig_a2a::axum::serve(listener, app).await?;
     Ok(())

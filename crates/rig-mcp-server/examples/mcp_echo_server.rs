@@ -9,6 +9,7 @@
 //! PORT=3400 MCP_TOKEN=secret cargo run --example mcp_echo_server -- http
 //! ```
 
+use anyhow::Context as _;
 use rig_agent::AgentBuilder;
 use rig_core::completion::ToolAnnotations;
 use rig_core::test_utils::{MockCompletionModel, MockStreamEvent};
@@ -17,6 +18,7 @@ use rig_mcp_server::McpServer;
 use rmcp::model::{PromptArgument, PromptMessage, Role};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::process::ExitCode;
 
 /// How many calls the scripted agent answers.
 const REPLIES: usize = 1_000;
@@ -56,7 +58,17 @@ impl Tool for Add {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), rig_mcp_server::ServeError> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+async fn run() -> anyhow::Result<()> {
     let turns = (0..REPLIES).map(|_| {
         vec![
             MockStreamEvent::text("po"),
@@ -92,14 +104,29 @@ async fn main() -> Result<(), rig_mcp_server::ServeError> {
         );
 
     if std::env::args().nth(1).as_deref() != Some("http") {
-        return server.serve_stdio().await;
+        return server
+            .serve_stdio()
+            .await
+            .map_err(|error| anyhow::anyhow!(error));
     }
     if let Ok(token) = std::env::var("MCP_TOKEN") {
         server = server.bearer_token(token);
     }
-    let port: u16 = std::env::var("PORT").map_or(Ok(3400), |port| port.parse())?;
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let port = port(3400)?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .with_context(|| format!("could not listen on 127.0.0.1:{port}"))?;
     eprintln!("echo MCP server at http://127.0.0.1:{port}/mcp");
     rig_mcp_server::axum::serve(listener, server.into_router()?).await?;
     Ok(())
+}
+
+/// `PORT`, or `default` when it is not set. A value that is not a port number is an error.
+fn port(default: u16) -> anyhow::Result<u16> {
+    match std::env::var("PORT") {
+        Ok(value) => value
+            .parse()
+            .with_context(|| format!("PORT must be a port number from 0 to 65535, got {value:?}")),
+        Err(_) => Ok(default),
+    }
 }
