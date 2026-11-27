@@ -2,6 +2,11 @@
 
 Versions follow Rig's: rig-a2a 0.47.x works with Rig 0.47.
 
+## Unreleased
+
+- README: the call example sets `default_max_turns`. Rig's default of one turn failed the
+  first remote tool call.
+
 ## 0.47.2 (2026-11-26)
 
 - docs.rs documents every feature, each item marked with the feature it needs.
