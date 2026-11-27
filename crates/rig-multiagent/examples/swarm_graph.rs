@@ -16,7 +16,8 @@
 //! the environment does not start paid calls by accident. The scripted
 //! answers come from Rig's mock models, as the crate's tests use them; in live
 //! mode the model decides what each agent says, so only the scripted run
-//! checks the join.
+//! checks the join. A live model may also keep handing off instead of
+//! answering, so a live run can stop at `max_handoffs` with an error.
 //!
 //! Swarm agents need `default_max_turns`: the handoff is a tool call, and a Rig
 //! agent's default of one turn ends before the tool result is used. See
