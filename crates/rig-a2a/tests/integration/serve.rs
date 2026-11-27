@@ -263,3 +263,71 @@ async fn parts_the_agent_cannot_read_are_refused() -> anyhow::Result<()> {
     ensure!(task.status.state == TaskState::Rejected, "{task:?}");
     Ok(())
 }
+
+#[tokio::test]
+async fn terminal_task_limit_purges_the_oldest_finished_tasks() -> anyhow::Result<()> {
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let mut turns = vec![vec![
+        MockStreamEvent::tool_call("call-1", "controlled", serde_json::json!({})),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]];
+    turns.extend((0..8).map(|_| reply(&["done"])));
+    let model = MockCompletionModel::from_stream_turns(turns);
+    let agent = AgentBuilder::new(model)
+        .name("echo")
+        .tool(MockControlledTool::new(Arc::clone(&started), release))
+        .default_max_turns(2)
+        .build();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}", listener.local_addr()?);
+    let app = A2aServer::new(agent, &url)
+        .terminal_task_limit(3)
+        .into_router();
+    tokio::spawn(async move { rig_a2a::axum::serve(listener, app).await });
+    let client = connect(&url, TRANSPORT_PROTOCOL_JSONRPC).await?;
+
+    // A task that stays running through every purge below.
+    let mut stream = client
+        .send_streaming_message(&request("Wait", None))
+        .await?;
+    let Some(Ok(StreamResponse::Task(running))) = stream.next().await else {
+        anyhow::bail!("the stream starts with the task");
+    };
+    started.notified().await;
+
+    let mut finished = Vec::new();
+    for i in 0..8 {
+        let SendMessageResponse::Task(task) = client
+            .send_message(&request(&format!("quick {i}"), None))
+            .await?
+        else {
+            anyhow::bail!("a message starts a task");
+        };
+        ensure!(task.status.state == TaskState::Completed, "{task:?}");
+        finished.push(task.id);
+    }
+
+    let query = |id: &str| GetTaskRequest {
+        id: id.to_owned(),
+        history_length: None,
+        tenant: None,
+    };
+    let (evicted, kept) = finished.split_at(5);
+    for id in evicted {
+        let error = client
+            .get_task(&query(id))
+            .await
+            .err()
+            .context("the oldest finished tasks are purged")?;
+        ensure!(error.code == error_code::TASK_NOT_FOUND, "{error:?}");
+    }
+    for id in kept {
+        let task = client.get_task(&query(id)).await?;
+        ensure!(task.status.state == TaskState::Completed, "{task:?}");
+    }
+    let task = client.get_task(&query(&running.id)).await?;
+    ensure!(task.status.state == TaskState::Working, "{task:?}");
+    Ok(())
+}
