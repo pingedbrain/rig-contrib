@@ -12,14 +12,18 @@ works with Rig 0.47.
 
 ## Crates
 
-| Crate | | What it does |
-|---|---|---|
-| [`rig-a2a`](crates/rig-a2a) | [![crates.io](https://img.shields.io/crates/v/rig-a2a.svg)](https://crates.io/crates/rig-a2a) [![docs.rs](https://img.shields.io/docsrs/rig-a2a)](https://docs.rs/rig-a2a) | Serve a Rig agent over the A2A protocol (v1.0, and v0.3 for Strands Agents), and call remote A2A agents as Rig tools. |
-| [`rig-mcp-server`](crates/rig-mcp-server) | [![crates.io](https://img.shields.io/crates/v/rig-mcp-server.svg)](https://crates.io/crates/rig-mcp-server) [![docs.rs](https://img.shields.io/docsrs/rig-mcp-server)](https://docs.rs/rig-mcp-server) | Serve Rig agents and tools over the Model Context Protocol, over stdio or Streamable HTTP. |
-| [`rig-multiagent`](crates/rig-multiagent) | [![crates.io](https://img.shields.io/crates/v/rig-multiagent.svg)](https://crates.io/crates/rig-multiagent) [![docs.rs](https://img.shields.io/docsrs/rig-multiagent)](https://docs.rs/rig-multiagent) | Swarms of agents that hand work to each other, and graphs of agents and functions; streamed, with a person in the loop, resumable from checkpoints. |
-| [`rig-otel`](crates/rig-otel) | [![crates.io](https://img.shields.io/crates/v/rig-otel.svg)](https://crates.io/crates/rig-otel) [![docs.rs](https://img.shields.io/docsrs/rig-otel)](https://docs.rs/rig-otel) | OpenTelemetry in one call: Rig's spans over OTLP, GenAI metrics, sessions and traces across processes, with SigV4 export to Amazon CloudWatch. |
-| [`rig-evals`](crates/rig-evals) | [![crates.io](https://img.shields.io/crates/v/rig-evals.svg)](https://crates.io/crates/rig-evals) [![docs.rs](https://img.shields.io/docsrs/rig-evals)](https://docs.rs/rig-evals) | Evaluate Rig agents: datasets, built-in and LLM-judge evaluators, AWS AgentCore Evaluations, pass-rate thresholds for CI, JUnit/JSON/Markdown reports. |
-| [`rig-agentcore`](crates/rig-agentcore) | [![crates.io](https://img.shields.io/crates/v/rig-agentcore.svg)](https://crates.io/crates/rig-agentcore) [![docs.rs](https://img.shields.io/docsrs/rig-agentcore)](https://docs.rs/rig-agentcore) | Run a Rig agent on AWS Bedrock AgentCore Runtime: its HTTP contract, sessions, streaming and the traces AgentCore reads. |
+- **[`rig-a2a`](crates/rig-a2a)**: Serve a Rig agent over the A2A protocol (v1.0, and v0.3 for Strands Agents), and call remote A2A agents as Rig tools.  
+  [crates.io](https://crates.io/crates/rig-a2a) · [docs](https://docs.rs/rig-a2a)
+- **[`rig-mcp-server`](crates/rig-mcp-server)**: Serve Rig agents and tools over the Model Context Protocol, over stdio or Streamable HTTP.  
+  [crates.io](https://crates.io/crates/rig-mcp-server) · [docs](https://docs.rs/rig-mcp-server)
+- **[`rig-multiagent`](crates/rig-multiagent)**: Swarms of agents that hand work to each other, and graphs of agents and functions; streamed, with a person in the loop, resumable from checkpoints.  
+  [crates.io](https://crates.io/crates/rig-multiagent) · [docs](https://docs.rs/rig-multiagent)
+- **[`rig-otel`](crates/rig-otel)**: OpenTelemetry in one call: Rig's spans over OTLP, GenAI metrics, sessions and traces across processes, with SigV4 export to Amazon CloudWatch.  
+  [crates.io](https://crates.io/crates/rig-otel) · [docs](https://docs.rs/rig-otel)
+- **[`rig-evals`](crates/rig-evals)**: Evaluate Rig agents: datasets, built-in and LLM-judge evaluators, AWS AgentCore Evaluations, pass-rate thresholds for CI, JUnit/JSON/Markdown reports.  
+  [crates.io](https://crates.io/crates/rig-evals) · [docs](https://docs.rs/rig-evals)
+- **[`rig-agentcore`](crates/rig-agentcore)**: Run a Rig agent on AWS Bedrock AgentCore Runtime: its HTTP contract, sessions, streaming and the traces AgentCore reads.  
+  [crates.io](https://crates.io/crates/rig-agentcore) · [docs](https://docs.rs/rig-agentcore)
 
 Each crate stands on its own; add only the ones you need:
 
