@@ -5,6 +5,7 @@ Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 ## Unreleased
 
 - README snippets are compile-checked as doctests, so the examples cannot rot.
+- `RunState` implements `UnwindSafe` and `RefUnwindSafe`, so `GraphState` and `GraphRun` keep the auto traits they had in 0.47.3.
 - Feature: request-scoped run state. `RunState` carries typed values (a user id, a database
   handle) into a graph run through `run_with_state`, `stream_with_state`, `run_as_with_state` and
   `stream_as_with_state`. Nodes made with `node_fn_with_state`, edge conditions and nested

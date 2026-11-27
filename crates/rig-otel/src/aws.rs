@@ -31,9 +31,10 @@ pub enum AwsError {
     /// The tokio runtime the exporters sign requests on is missing.
     #[error("set up CloudWatch export from inside a tokio runtime")]
     NoRuntime,
-    /// The HTTP client for the endpoints could not be built.
-    #[error("HTTP client for CloudWatch: {0}")]
-    Client(String),
+    /// The HTTP client for the endpoints could not be built. The cause is
+    /// logged with `tracing` at the failure.
+    #[error("could not build the HTTP client for CloudWatch")]
+    HttpClient,
 }
 
 /// The OTel spec default for OTLP exporter timeouts.
@@ -172,7 +173,10 @@ impl TelemetryBuilder {
                 .connect_timeout(CONNECT_TIMEOUT)
                 .timeout(timeout)
                 .build()
-                .map_err(|error| InitError::Aws(AwsError::Client(error.to_string())))?;
+                .map_err(|error| {
+                    tracing::error!(%error, "building the CloudWatch HTTP client failed");
+                    InitError::Aws(AwsError::HttpClient)
+                })?;
             Ok(SigV4Client {
                 http,
                 credentials: credentials.clone(),
