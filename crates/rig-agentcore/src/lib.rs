@@ -18,9 +18,12 @@
 //!   [`AgentCoreApp::spawn_task`] is open, so AgentCore Runtime keeps the
 //!   session running until that work ends.
 //!
-//! - prompts and replies go on the spans only with
-//!   [`AgentCoreApp::record_content`] (off by default, as in Rig). AgentCore
-//!   Evaluations needs them to judge a session.
+//! - prompts and replies go on the spans with [`AgentCoreApp::record_content`].
+//!   Unset, the agent's own
+//!   [`record_content_telemetry`](rig_agent::AgentBuilder::record_content_telemetry) setting applies to
+//!   the agent's spans; the invocation span carries them only when
+//!   `record_content(true)` is set. AgentCore Evaluations needs them to judge
+//!   a session.
 //!
 //! ```no_run
 //! async fn run(agent: rig_agent::Agent) -> Result<(), rig_agentcore::ServeError> {
@@ -130,11 +133,20 @@ struct Inner {
     history: Arc<dyn HistoryStore>,
     window: Arc<dyn Recent>,
     summarizing: Option<Summarizing>,
-    record_content: bool,
+    record_content: Option<bool>,
     slots: Option<Arc<Semaphore>>,
     max_run: Option<Duration>,
     max_request_bytes: usize,
     busy: Arc<Busy>,
+}
+
+impl Inner {
+    /// Whether the invocation span carries prompts and answers. With no
+    /// [`AgentCoreApp::record_content`] there is no agent setting to follow
+    /// here, so it does not.
+    fn records_invocation_content(&self) -> bool {
+        self.record_content == Some(true)
+    }
 }
 
 impl AgentCoreApp {
@@ -146,7 +158,7 @@ impl AgentCoreApp {
                 history: Arc::new(InMemory::new(DEFAULT_MAX_SESSIONS)),
                 window: Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
                 summarizing: None,
-                record_content: false,
+                record_content: None,
                 slots: None,
                 max_run: None,
                 max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
@@ -258,11 +270,19 @@ impl AgentCoreApp {
     }
 
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
-    /// needs them to judge a session; they are off by default, as in Rig,
-    /// because they put conversation content into your telemetry.
+    /// needs them to judge a session; they put conversation content into your
+    /// telemetry.
+    ///
+    /// Set, this overrides the agent's own
+    /// [`record_content_telemetry`](rig_agent::AgentBuilder::record_content_telemetry)
+    /// for every invocation, in both directions. Unset (the default), the
+    /// agent's setting applies to its spans, which is off unless the agent turns
+    /// it on. The invocation span (`gen_ai.task.input`, `gen_ai.task.output` and
+    /// the `agentcore.invocation.*` fields) has no agent setting to follow, so it
+    /// carries content only when this is set to `true`.
     #[must_use]
     pub fn record_content(self, record: bool) -> Self {
-        self.rebuild(|inner| inner.record_content = record)
+        self.rebuild(|inner| inner.record_content = Some(record))
     }
 
     /// Run at most `max` invocations at once (at least one). An invocation
@@ -456,7 +476,7 @@ async fn invoke(
         agentcore.invocation.user_prompt = tracing::field::Empty,
         agentcore.invocation.agent_response = tracing::field::Empty,
     );
-    if app.inner.record_content {
+    if app.inner.records_invocation_content() {
         span.record("gen_ai.task.input", invocation.prompt.as_str());
         span.record(
             "agentcore.invocation.user_prompt",
@@ -532,16 +552,12 @@ async fn whole(
             return timed_out(inner.max_run);
         }
     };
-    let run = within(
-        deadline,
-        inner
-            .agent
-            .prompt(prompt)
-            .history(history)
-            .record_content_telemetry(inner.record_content)
-            .run(),
-    )
-    .await;
+    let request = inner.agent.prompt(prompt).history(history);
+    let request = match inner.record_content {
+        Some(record) => request.record_content_telemetry(record),
+        None => request,
+    };
+    let run = within(deadline, request.run()).await;
     match run {
         // A stopped run is dropped before `save`, so its turn is not kept.
         Err(_) => {
@@ -551,7 +567,7 @@ async fn whole(
         Ok(Ok(response)) => {
             save(inner, &session, response.messages.clone()).await;
             let answer = response.output();
-            record_answer(inner.record_content, &answer);
+            record_answer(inner.records_invocation_content(), &answer);
             Json(json!({"response": answer, "status": "success"})).into_response()
         }
         Ok(Err(failure)) => {
@@ -640,12 +656,12 @@ fn stream(
                     return;
                 }
             };
-            let mut run = inner
-                .agent
-                .prompt(prompt)
-                .history(history)
-                .record_content_telemetry(inner.record_content)
-                .stream();
+            let request = inner.agent.prompt(prompt).history(history);
+            let request = match inner.record_content {
+                Some(record) => request.record_content_telemetry(record),
+                None => request,
+            };
+            let mut run = request.stream();
             loop {
                 let item = match within(deadline, run.next()).await {
                     Ok(Some(item)) => item,
@@ -665,7 +681,7 @@ fn stream(
                     Ok(MultiTurnStreamItem::FinalResponse(response)) => {
                         save(inner, &session, response.messages.clone()).await;
                         let answer = response.output();
-                        record_answer(inner.record_content, &answer);
+                        record_answer(inner.records_invocation_content(), &answer);
                         let _ = sender.send(json!({"response": answer}));
                         return;
                     }
