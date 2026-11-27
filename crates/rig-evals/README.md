@@ -63,7 +63,10 @@ A case with `turns` instead of `input` is a conversation: each turn is a user me
 sent in order on one conversation, so a later turn can refer to earlier answers. The
 target answers the last turn, and the evaluators score that answer, the tool calls over
 all turns, and the usage over all turns. The trial's `transcript` holds each turn and its
-answer; the judge sees it too.
+answer. The judge sees every turn in its prompt, but its verdict and the case's `assertions`
+apply to the final answer (`output`). An assertion about an earlier turn fails unless it
+says so (for example "at any turn, apologizes"); to grade the whole conversation, use
+`LlmJudge::goal_success`.
 
 ```json
 {"id": "city", "turns": ["My favourite city is Lisbon.", "I like walking there.",
