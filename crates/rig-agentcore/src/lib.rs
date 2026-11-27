@@ -7,7 +7,8 @@
 //! session (the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header) is one
 //! conversation. [`AgentCoreApp`] serves that contract for a Rig agent:
 //!
-//! - the session's conversation is kept between invocations;
+//! - the session's conversation is kept between invocations, in memory or in
+//!   any [`rig_memory`] store (see [`AgentCoreApp::history_store`]);
 //! - the reply streams as server-sent events when the caller asks for
 //!   `text/event-stream`, and is one JSON object otherwise;
 //! - each invocation runs in a span that continues the caller's trace and
@@ -32,7 +33,7 @@
     )
 )]
 
-mod sessions;
+mod history;
 
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -47,14 +48,17 @@ use axum::routing::{get, post};
 use futures::StreamExt;
 use rig_agent::Agent;
 use rig_agent::agent::MultiTurnStreamItem;
+use rig_core::message::Message;
 use rig_core::streaming::{Item, StreamEvent};
-use rig_memory::recent::{Recent, TokenBudget};
+use rig_core::wasm_compat::{WasmCompatSend, WasmCompatSync};
+use rig_memory::AsyncStore;
+use rig_memory::recent::{Recent, TokenBudget, view};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::Instrument;
 
-use crate::sessions::Sessions;
+use crate::history::{HistoryError, HistoryStore, InMemory, Persistent, local_id};
 
 /// The header AgentCore Runtime names the session with.
 pub const SESSION_HEADER: &str = "x-amzn-bedrock-agentcore-runtime-session-id";
@@ -69,6 +73,9 @@ pub const DEFAULT_MAX_SESSIONS: usize = 1000;
 
 /// How many tokens of history a session keeps by default.
 pub const DEFAULT_HISTORY_TOKENS: usize = 32_000;
+
+/// The session stores and history windows conversations are kept with.
+pub use rig_memory;
 
 /// Why the app stopped serving.
 #[derive(Debug, thiserror::Error)]
@@ -94,9 +101,11 @@ pub struct AgentCoreApp {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone)]
 struct Inner {
     agent: Agent,
-    sessions: Sessions,
+    history: Arc<dyn HistoryStore>,
+    window: Arc<dyn Recent>,
     record_content: bool,
 }
 
@@ -106,35 +115,58 @@ impl AgentCoreApp {
         Self {
             inner: Arc::new(Inner {
                 agent,
-                sessions: Sessions::new(
-                    DEFAULT_MAX_SESSIONS,
-                    Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
-                ),
+                history: Arc::new(InMemory::new(DEFAULT_MAX_SESSIONS)),
+                window: Arc::new(TokenBudget::new(DEFAULT_HISTORY_TOKENS)),
                 record_content: false,
             }),
         }
     }
 
-    /// Keep at most `max` sessions' conversations, forgetting the oldest.
+    /// Keep at most `max` sessions' conversations in memory, forgetting the
+    /// oldest. This is the default, with [`DEFAULT_MAX_SESSIONS`]. It replaces
+    /// a store set with [`history_store`](Self::history_store).
     #[must_use]
     pub fn max_sessions(self, max: usize) -> Self {
-        self.rebuild(|inner| {
-            inner.sessions = Sessions::new(max, inner.sessions.window());
-        })
+        self.rebuild(|inner| inner.history = Arc::new(InMemory::new(max)))
+    }
+
+    /// Keep sessions in `store`, one session log per session id, so they
+    /// survive restarts and several apps can share them: any [`rig_memory`]
+    /// store, such as `rig_memory::DirStore` (feature `fs`) or the
+    /// `rig-sqlite` and `rig-postgres` stores. Any session id works: one that
+    /// is 1 to 128 ASCII letters, digits, `-` or `_` names its log as it is,
+    /// any other is hashed into a safe log name. Two apps, or concurrent
+    /// invocations of one session, saving at once do not lose either turn: a
+    /// save that loses a race rereads and retries up to 10 times with a short
+    /// jittered backoff. If a save still fails, the invocation's answer is
+    /// returned anyway, the failure is logged, and that run's turn is not
+    /// persisted, so later invocations do not see it. A load that fails is
+    /// reported to the caller as an error, before the agent runs. The store
+    /// keeps each session's whole conversation;
+    /// [`history_window`](Self::history_window) limits only what an invocation
+    /// sends. Replaces the in-memory store set by [`max_sessions`](Self::max_sessions).
+    #[must_use]
+    pub fn history_store<S>(self, store: S) -> Self
+    where
+        S: AsyncStore + WasmCompatSend + WasmCompatSync + 'static,
+    {
+        self.rebuild(|inner| inner.history = Arc::new(Persistent(store)))
     }
 
     /// Which newest messages of a session each invocation sends the model,
     /// such as `rig_memory::recent::TokenBudget::new(8_000)` or
-    /// `LastMessages(20)`. Messages the window no longer keeps are forgotten,
-    /// not only left out of the request. Defaults to
-    /// [`DEFAULT_HISTORY_TOKENS`] tokens. A tool result is never sent without
-    /// its call. An empty window (`TokenBudget::new(0)`, `LastMessages(0)`)
-    /// keeps nothing, so every invocation starts without history.
+    /// `LastMessages(20)`. Defaults to [`DEFAULT_HISTORY_TOKENS`] tokens. A
+    /// tool result is never sent without its call. An empty window
+    /// (`TokenBudget::new(0)`, `LastMessages(0)`) sends no history.
+    ///
+    /// What the window also does depends on the store. In memory, messages
+    /// beyond it are forgotten when a run is saved, so memory stays bounded.
+    /// With [`history_store`](Self::history_store), the store keeps the whole
+    /// conversation and the window only limits what is sent, so a later,
+    /// wider window sees older turns again.
     #[must_use]
     pub fn history_window(self, window: impl Recent + 'static) -> Self {
-        self.rebuild(|inner| {
-            inner.sessions = Sessions::new(inner.sessions.capacity(), Arc::new(window));
-        })
+        self.rebuild(|inner| inner.window = Arc::new(window))
     }
 
     /// Record prompts and replies on the GenAI spans. AgentCore Evaluations
@@ -146,14 +178,7 @@ impl AgentCoreApp {
     }
 
     fn rebuild(self, change: impl FnOnce(&mut Inner)) -> Self {
-        let mut inner = match Arc::try_unwrap(self.inner) {
-            Ok(inner) => inner,
-            Err(shared) => Inner {
-                agent: shared.agent.clone(),
-                sessions: Sessions::new(shared.sessions.capacity(), shared.sessions.window()),
-                record_content: shared.record_content,
-            },
-        };
+        let mut inner = Arc::try_unwrap(self.inner).unwrap_or_else(|shared| (*shared).clone());
         change(&mut inner);
         Self {
             inner: Arc::new(inner),
@@ -233,7 +258,7 @@ async fn invoke(
         .get(SESSION_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
-        .map_or_else(sessions::local_id, str::to_owned);
+        .map_or_else(local_id, str::to_owned);
     // The invocation is the agent run AgentCore Evaluations looks for: an
     // `invoke_agent` span (Rig adopts it as the run's span, so it makes none
     // of its own), with the prompt and the answer when content is recorded.
@@ -273,9 +298,28 @@ async fn invoke(
     }
 }
 
+/// The session's conversation as a request sends it: the newest messages
+/// the window keeps.
+async fn history_of(inner: &Inner, session: &str) -> Result<Vec<Message>, HistoryError> {
+    let messages = inner.history.load(session).await?;
+    Ok(view(&messages, inner.window.as_ref())
+        .iter()
+        .map(|message| (**message).clone())
+        .collect())
+}
+
 async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
     let inner = &app.inner;
-    let history = inner.sessions.history(&session);
+    let history = match history_of(inner, &session).await {
+        Ok(history) => history,
+        Err(failure) => {
+            tracing::warn!(error = %failure, "could not load the conversation");
+            return error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the conversation could not be loaded",
+            );
+        }
+    };
     let run = inner
         .agent
         .prompt(prompt)
@@ -285,7 +329,7 @@ async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
         .await;
     match run {
         Ok(response) => {
-            inner.sessions.append(&session, response.messages.clone());
+            save(inner, &session, response.messages.clone()).await;
             let answer = response.output();
             record_answer(inner.record_content, &answer);
             Json(json!({"response": answer, "status": "success"})).into_response()
@@ -297,6 +341,18 @@ async fn whole(app: AgentCoreApp, session: String, prompt: String) -> Response {
     }
 }
 
+/// Add a finished run to its session. A save that fails is logged, not
+/// reported: the answer was already produced.
+async fn save(inner: &Inner, session: &str, messages: Vec<Message>) {
+    if let Err(failure) = inner
+        .history
+        .append(session, messages, inner.window.as_ref())
+        .await
+    {
+        tracing::warn!(error = %failure, "could not save the conversation");
+    }
+}
+
 /// Stream the reply as server-sent events: `{"text": ...}` as the model
 /// writes, then `{"response": ...}` with the whole answer, or `{"error": ...}`.
 fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Span) -> Response {
@@ -304,7 +360,14 @@ fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Spa
     tokio::spawn(
         async move {
             let inner = &app.inner;
-            let history = inner.sessions.history(&session);
+            let history = match history_of(inner, &session).await {
+                Ok(history) => history,
+                Err(failure) => {
+                    tracing::warn!(error = %failure, "could not load the conversation");
+                    let _ = sender.send(json!({"error": "the conversation could not be loaded"}));
+                    return;
+                }
+            };
             let mut run = inner
                 .agent
                 .prompt(prompt)
@@ -319,7 +382,7 @@ fn stream(app: AgentCoreApp, session: String, prompt: String, span: tracing::Spa
                         let _ = sender.send(json!({"text": text}));
                     }
                     Ok(MultiTurnStreamItem::FinalResponse(response)) => {
-                        inner.sessions.append(&session, response.messages.clone());
+                        save(inner, &session, response.messages.clone()).await;
                         let answer = response.output();
                         record_answer(inner.record_content, &answer);
                         let _ = sender.send(json!({"response": answer}));

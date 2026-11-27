@@ -20,9 +20,28 @@ rig_agentcore::AgentCoreApp::new(agent)
 
 - **Sessions:** the `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` header names the
   conversation; each session's messages are kept and sent with its next invocation.
+  By default they live in memory (at most 1000 sessions, oldest forgotten first).
+  `history_store` keeps them in any [`rig-memory`](https://crates.io/crates/rig-memory)
+  store (`DirStore` on disk, `rig-sqlite`, `rig-postgres`), so they survive a restart
+  and several apps can share them. Any session id works: one of 1-128 of `[A-Za-z0-9_-]`
+  names its log as it is, any other is hashed into a safe log name. A save that loses
+  a race with another writer retries up to 10 times; if it still fails, the answer is
+  returned, the failure is logged, and that turn is not persisted. A failed load is an
+  error reported before the agent runs.
   Each invocation sends the newest messages that fit `history_window` (32k tokens by
-  default, `rig_memory::recent::TokenBudget`). Messages beyond it are forgotten, never
-  splitting a tool call from its result. An empty window keeps no history.
+  default, `rig_memory::recent::TokenBudget`), never splitting a tool call from its
+  result. An empty window sends no history. In memory, messages beyond the window are
+  forgotten when a run is saved. With `history_store`, the store keeps the whole
+  conversation and the window only limits what is sent.
+
+  ```rust
+  AgentCoreApp::new(agent)
+      .history_store(rig_memory::DirStore::open("/var/lib/agent/sessions")?)
+      .history_window(rig_memory::recent::TokenBudget::new(16_000));
+  ```
+
+  `DirStore` needs rig-memory's `fs` feature: enable it in your own `Cargo.toml`
+  (`rig-memory = { version = "0.47", features = ["fs"] }`).
 - **Traces:** each invocation runs in an `agentcore.invocation` span that continues the
   caller's trace (`traceparent`) and gives every span under it `session.id`, through
   [`rig-otel`](https://crates.io/crates/rig-otel). With rig-otel's `aws` feature exporting to CloudWatch, that
