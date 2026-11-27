@@ -66,6 +66,12 @@ A single-turn case is judged the same way, on its one turn.";
 impl LlmJudge {
     /// A judge running `agent` (the judge model) with `rubric`, named
     /// `llm_judge`.
+    ///
+    /// On a multi-turn case the prompt carries every turn (the transcript),
+    /// but the verdict is on the final answer: the rubric's "the answer" and
+    /// the case's assertions mean that answer. An assertion about an earlier
+    /// turn needs to say so, such as "at any turn, apologizes". To grade the
+    /// whole conversation, use [`goal_success`](Self::goal_success).
     pub fn new(agent: Agent, rubric: impl Into<String>) -> Self {
         Self::named("llm_judge", agent, rubric)
     }
