@@ -12,9 +12,18 @@
 //! - `RIG_MODEL=<id>` runs on OpenRouter, with the key in `OPENROUTER_API_KEY`.
 //!   `OPENROUTER_MODEL` is used when `RIG_MODEL` is unset.
 //!
+//! On OpenCode Go:
+//!
 //! ```sh
 //! set -a; . /path/to/rig/.env; set +a
 //! RIG_MODEL=opencode-go/glm-5.3 cargo run -p rig-a2a --example remote_tool
+//! ```
+//!
+//! On OpenRouter:
+//!
+//! ```sh
+//! set -a; . /path/to/rig/.env; set +a
+//! RIG_MODEL=deepseek/deepseek-chat cargo run -p rig-a2a --example remote_tool
 //! ```
 
 use std::env;
