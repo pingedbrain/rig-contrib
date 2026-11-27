@@ -8,4 +8,5 @@
 
 mod contract;
 mod history;
+mod limits;
 mod summary;
