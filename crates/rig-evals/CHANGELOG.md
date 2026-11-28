@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.47.5 (2026-11-28)
 
 - Examples: `evals` prints a one-line hint when every trial errored, which a provider rate limit (429) causes, and the README says to lower `concurrency` or run again later.
 

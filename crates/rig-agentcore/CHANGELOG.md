@@ -2,7 +2,7 @@
 
 Versions follow Rig's: rig-agentcore 0.47.x works with Rig 0.47.
 
-## Unreleased
+## 0.47.5 (2026-11-28)
 
 - Examples: `serve` exports traces over OTLP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set, so its spans can be seen locally. Unset, it sets up no telemetry, as before. The example takes rig-otel's `otlp` feature as a dev-dependency; the library is unchanged.
 - Docs: the step-6 observability steps in the README serve the app as `AgentCoreApp::new(agent).record_content(true)`, since the app's setting overrides the agent's. The body limit is 2 MiB (was "2 MB").

@@ -2,7 +2,7 @@
 
 Versions follow Rig's: rig-multiagent 0.47.x works with Rig 0.47.
 
-## Unreleased
+## 0.47.5 (2026-11-28)
 
 - Examples: `swarm_graph` prints only the failure kind (for example `agent_failed`) and exits 1 when a run fails. It no longer prints the Rig error text, which can carry provider output.
 

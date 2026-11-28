@@ -2,7 +2,7 @@
 
 Versions follow Rig's: rig-mcp-server 0.47.x works with Rig 0.47.
 
-## Unreleased
+## 0.47.5 (2026-11-28)
 
 - Docs: the settings table in the README lists `max_request_bytes` (4 MiB, HTTP 413, Streamable HTTP only).
 
