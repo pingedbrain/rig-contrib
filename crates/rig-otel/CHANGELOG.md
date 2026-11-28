@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.5 (2026-11-28)
+
+- No changes; released with the other crates.
+
 ## 0.47.4 (2026-11-27)
 
 - `agent_span(name)`: the outer span of an agent run, named `invoke_agent <name>` with `gen_ai.operation.name` `invoke_agent` and `gen_ai.agent.name`. Rig adopts an enabled outer span as the run's span, so a bare `conversation` span exported no `invoke_agent` span. The README and the `console` example use it now, with `set_session`.
