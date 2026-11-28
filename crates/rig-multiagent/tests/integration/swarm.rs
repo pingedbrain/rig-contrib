@@ -507,3 +507,50 @@ async fn one_turn_still_runs_handoffs_and_direct_answers() {
     assert_eq!(researcher_model.requests().len(), 1);
     assert_eq!(coder_model.requests().len(), 1);
 }
+
+/// A tool that never returns, so the agent that calls it never answers.
+#[derive(Clone, Default)]
+struct Stall;
+
+impl Tool for Stall {
+    const NAME: &'static str = "stall";
+    type Args = Value;
+    type Output = String;
+    type Error = Never;
+
+    fn description(&self) -> String {
+        "Never returns.".into()
+    }
+
+    fn parameters(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+
+    async fn call(&self, _context: &mut ToolContext, _args: Value) -> Result<String, Never> {
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn an_agent_that_never_answers_hits_the_agent_timeout() {
+    let model =
+        MockCompletionModel::from_turns([MockTurn::tool_call("call-1", "stall", json!({}))]);
+    let stuck = AgentBuilder::new(model)
+        .name("stuck")
+        .description("Never answers")
+        .tool(Stall)
+        .default_max_turns(5)
+        .build();
+    let swarm = Swarm::builder()
+        .agent(stuck)
+        .agent_timeout(std::time::Duration::from_millis(50))
+        .build()
+        .unwrap();
+
+    let error = swarm.run("Task").await.unwrap_err();
+
+    assert!(
+        matches!(&error.reason, SwarmFailure::Timeout { agent } if agent == "stuck"),
+        "{error:?}"
+    );
+}

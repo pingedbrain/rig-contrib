@@ -1,5 +1,10 @@
+use aws_config::{BehaviorVersion, Region, SdkConfig};
+use aws_credential_types::Credentials;
+use aws_credential_types::provider::SharedCredentialsProvider;
 use aws_sdk_bedrockagentcore::types::EvaluationResultContent;
 use aws_sdk_cloudwatchlogs::types::ResultField;
+use aws_smithy_http_client::test_util::{ReplayEvent, StaticReplayClient};
+use aws_smithy_types::body::SdkBody;
 use serde_json::json;
 
 use super::*;
@@ -319,4 +324,90 @@ async fn a_trial_needs_a_session_and_its_runtime() {
     trial.error = Some("boom".into());
     let score = evaluator.evaluate(&case, &trial).await.unwrap();
     assert!(!score.passed);
+}
+
+/// AgentCore clients whose CloudWatch Logs answers are `answers` empty
+/// queries, one per poll: the session's spans never arrive.
+fn empty_logs(answers: usize) -> AgentCore {
+    let events: Vec<ReplayEvent> = (0..answers)
+        .flat_map(|_| {
+            [
+                ReplayEvent::new(
+                    http::Request::post("https://logs.us-east-1.amazonaws.com/")
+                        .header("x-amz-target", "Logs_20140328.StartQuery")
+                        .body(SdkBody::empty())
+                        .expect("a request"),
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/x-amz-json-1.1")
+                        .body(SdkBody::from(r#"{"queryId":"q"}"#))
+                        .expect("a response"),
+                ),
+                ReplayEvent::new(
+                    http::Request::post("https://logs.us-east-1.amazonaws.com/")
+                        .header("x-amz-target", "Logs_20140328.GetQueryResults")
+                        .body(SdkBody::empty())
+                        .expect("a request"),
+                    http::Response::builder()
+                        .status(200)
+                        .header("content-type", "application/x-amz-json-1.1")
+                        .body(SdkBody::from(r#"{"status":"Complete","results":[]}"#))
+                        .expect("a response"),
+                ),
+            ]
+        })
+        .collect();
+    let config = SdkConfig::builder()
+        .behavior_version(BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(SharedCredentialsProvider::new(Credentials::new(
+            "AKIDEXAMPLE",
+            "dummy-secret",
+            None,
+            None,
+            "test",
+        )))
+        .http_client(StaticReplayClient::new(events))
+        .build();
+    AgentCore::new(&config)
+}
+
+#[tokio::test]
+async fn spans_that_never_arrive_fail_after_the_ingestion_timeout() {
+    let agentcore = empty_logs(500);
+    let timeout = Duration::from_millis(50);
+
+    let error = agentcore
+        .spans(
+            "session-1",
+            "/aws/bedrock-agentcore/runtimes/agent-AbC123xyz-DEFAULT",
+            UNIX_EPOCH,
+            1,
+            timeout,
+            Duration::from_millis(5),
+        )
+        .await
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, AgentCoreError::NoSpans { session_id, waited }
+            if session_id == "session-1" && *waited == timeout),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn the_evaluator_builder_keeps_its_timing_and_log_group() {
+    let evaluator = empty_logs(0)
+        .evaluator("Builtin.Correctness")
+        .ingestion_timeout(Duration::from_secs(7))
+        .poll_interval(Duration::from_millis(250))
+        .runtime_log_group("/aws/bedrock-agentcore/runtimes/x-DEFAULT");
+
+    assert_eq!(evaluator.ingestion_timeout, Duration::from_secs(7));
+    assert_eq!(evaluator.poll_interval, Duration::from_millis(250));
+    assert_eq!(
+        evaluator.runtime_log_group.as_deref(),
+        Some("/aws/bedrock-agentcore/runtimes/x-DEFAULT")
+    );
 }

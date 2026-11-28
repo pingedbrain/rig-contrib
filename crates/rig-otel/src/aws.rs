@@ -213,6 +213,17 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::{DEFAULT_TIMEOUT, TelemetryBuilder, export_timeout_from};
+
+    /// As `tests/integration`: a global default, so exporter-thread warnings
+    /// do not depend on which test ran first.
+    fn pin_global_default() {
+        static PIN: std::sync::Once = std::sync::Once::new();
+        PIN.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing::subscriber::NoSubscriber::default(),
+            );
+        });
+    }
     use crate::Telemetry;
 
     fn env(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
@@ -273,6 +284,7 @@ mod tests {
     /// timeout, and flush and shutdown return.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hung_cloudwatch_endpoint_fails_the_export_within_its_timeout() {
+        pin_global_default();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
         let accept = tokio::spawn(async move {
