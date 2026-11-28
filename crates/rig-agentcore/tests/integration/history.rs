@@ -283,3 +283,38 @@ async fn a_save_failure_still_returns_the_answer() {
         assert_eq!(model.requests().len(), 1);
     }
 }
+
+#[tokio::test]
+async fn max_sessions_forgets_the_oldest_session_first() {
+    let model = MockCompletionModel::from_turns([
+        MockTurn::text("alpha reply"),
+        MockTurn::text("beta reply"),
+        MockTurn::text("alpha again"),
+    ]);
+    let app = AgentCoreApp::new(AgentBuilder::new(model.clone()).build()).max_sessions(1);
+    let url = serve(app).await;
+
+    invoke(&url, "alpha", "alpha first")
+        .await
+        .text()
+        .await
+        .unwrap();
+    // A second session evicts "alpha", the only one kept.
+    invoke(&url, "beta", "beta first")
+        .await
+        .text()
+        .await
+        .unwrap();
+    invoke(&url, "alpha", "alpha second")
+        .await
+        .text()
+        .await
+        .unwrap();
+
+    let seen = sent(&model, 2);
+    assert!(
+        !seen.contains("alpha first") && !seen.contains("alpha reply"),
+        "the evicted session kept its history: {seen}"
+    );
+    assert!(seen.contains("alpha second"), "{seen}");
+}

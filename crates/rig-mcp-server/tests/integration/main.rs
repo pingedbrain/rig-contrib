@@ -2,6 +2,8 @@
 //! one binary.
 
 mod catalog;
+mod host;
+mod limits;
 mod mcp;
 #[cfg(feature = "otel")]
 mod otel;
