@@ -121,3 +121,34 @@ async fn context_ids_that_could_escape_a_file_store_are_rejected() -> anyhow::Re
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn max_contexts_forgets_the_oldest_conversation_first() -> anyhow::Result<()> {
+    let scripted = model(&["alpha reply", "beta reply", "alpha again"]);
+    let url = {
+        let model = scripted.clone();
+        serve(move |url| {
+            A2aServer::new(AgentBuilder::new(model).name("Echo").build(), url).max_contexts(1)
+        })
+        .await?
+    };
+    let remote = RemoteAgent::connect(&url).await?;
+    let alpha = remote
+        .send("alpha first", None)
+        .await?
+        .context_id
+        .context("a context")?;
+    // A second conversation evicts "alpha", the only one kept.
+    remote.send("beta first", None).await?;
+    remote.send("alpha second", Some(&alpha)).await?;
+
+    let requests = scripted.requests();
+    let third = requests.get(2).context("a third request")?;
+    let seen = format!("{:?}", third.chat_history);
+    ensure!(
+        !seen.contains("alpha first") && !seen.contains("alpha reply"),
+        "the evicted conversation kept its history: {seen}"
+    );
+    ensure!(seen.contains("alpha second"), "{seen}");
+    Ok(())
+}
