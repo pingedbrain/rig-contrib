@@ -1,5 +1,5 @@
-//! A live run against an AgentCore runtime, skipped unless
-//! `RIG_EVALS_AGENTCORE_RUNTIME_ARN` names one (with AWS credentials and
+//! A live run against an AgentCore runtime, ignored unless run with
+//! `--ignored` and `RIG_EVALS_AGENTCORE_RUNTIME_ARN` naming one (with AWS credentials and
 //! region in the environment). The runtime must serve a Rig agent with a
 //! `calculate` tool, deployed with rig-agentcore and rig-otel recording
 //! content.
@@ -28,11 +28,10 @@ impl Evaluator for ContainsExpected {
 }
 
 #[tokio::test]
+#[ignore = "needs AWS: set RIG_EVALS_AGENTCORE_RUNTIME_ARN"]
 async fn agentcore_evaluators_score_a_live_runtime() {
-    let Ok(arn) = std::env::var("RIG_EVALS_AGENTCORE_RUNTIME_ARN") else {
-        eprintln!("skipped: set RIG_EVALS_AGENTCORE_RUNTIME_ARN to run against AgentCore");
-        return;
-    };
+    let arn = std::env::var("RIG_EVALS_AGENTCORE_RUNTIME_ARN")
+        .expect("set RIG_EVALS_AGENTCORE_RUNTIME_ARN to run this ignored test");
     let agentcore = AgentCore::from_env().await;
     let plain = " Respondé solo con el número, sin separadores de miles.";
     let dataset = Dataset::new([

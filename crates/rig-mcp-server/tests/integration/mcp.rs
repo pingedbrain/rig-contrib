@@ -13,6 +13,7 @@ use rmcp::service::{NotificationContext, PeerRequestOptions, RunningService};
 use rmcp::{ClientHandler, RoleClient, ServiceExt};
 use schemars::JsonSchema;
 use serde_json::{Value, json};
+use tokio::sync::watch;
 
 /// A plain Rig tool: adds two numbers, read-only.
 pub(crate) struct Add;
@@ -409,8 +410,36 @@ async fn a_rig_agent_uses_the_served_tools_through_rig_rmcp() -> anyhow::Result<
     Ok(())
 }
 
-/// A tool that never returns, so an agent run using it holds its slot.
-struct Hang;
+/// A tool that never returns, so an agent run using it holds its slot. Each
+/// entry bumps the count the receiver from [`Hang::new`] watches.
+#[derive(Clone)]
+struct Hang {
+    entered: Arc<watch::Sender<usize>>,
+}
+
+impl Hang {
+    fn new() -> (Self, watch::Receiver<usize>) {
+        let (entered, receiver) = watch::channel(0);
+        (
+            Self {
+                entered: Arc::new(entered),
+            },
+            receiver,
+        )
+    }
+}
+
+/// Wait until the tool has been entered `count` times, or fail after 5 s.
+async fn entered_times(entered: &mut watch::Receiver<usize>, count: usize) -> anyhow::Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        entered.wait_for(|entries| *entries >= count),
+    )
+    .await
+    .context("the tool was not entered in time")?
+    .map_err(|_| anyhow::anyhow!("the hang tool was dropped"))?;
+    Ok(())
+}
 
 impl Tool for Hang {
     const NAME: &'static str = "hang";
@@ -427,11 +456,12 @@ impl Tool for Hang {
     }
 
     async fn call(&self, _: &mut ToolContext, _: Value) -> Result<String, Self::Error> {
+        self.entered.send_modify(|entries| *entries += 1);
         std::future::pending().await
     }
 }
 
-fn hanging_agent(runs: usize) -> Agent {
+fn hanging_agent(runs: usize, hang: Hang) -> Agent {
     let model = MockCompletionModel::from_stream_turns((0..runs).map(|_| {
         vec![
             MockStreamEvent::tool_call("call-1", "hang", json!({})),
@@ -440,15 +470,16 @@ fn hanging_agent(runs: usize) -> Agent {
     }));
     AgentBuilder::new(model)
         .name("Slow")
-        .tool(Hang)
+        .tool(hang)
         .default_max_turns(2)
         .build()
 }
 
 #[tokio::test]
 async fn a_cancelled_call_stops_its_run_and_frees_its_slot() -> anyhow::Result<()> {
+    let (hang, mut entered) = Hang::new();
     let server = McpServer::new("test")
-        .agent(hanging_agent(2))
+        .agent(hanging_agent(2, hang))
         .max_concurrent_calls(1);
     let (client, _) = connect(server).await?;
 
@@ -458,7 +489,7 @@ async fn a_cancelled_call_stops_its_run_and_frees_its_slot() -> anyhow::Result<(
             PeerRequestOptions::no_options(),
         )
         .await?;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    entered_times(&mut entered, 1).await?;
     // While the first call holds the only slot, another is busy.
     let busy = client
         .call_tool(call("slow", json!({"message": "two"})))
@@ -467,25 +498,23 @@ async fn a_cancelled_call_stops_its_run_and_frees_its_slot() -> anyhow::Result<(
     ensure!(format!("{busy:?}").contains("busy"), "{busy:?}");
 
     first.cancel(None).await?;
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    // The cancelled run let go of its slot: this call is not busy (it runs,
-    // and is stopped by the timeout below instead).
-    let third = tokio::time::timeout(
-        std::time::Duration::from_millis(300),
-        client.call_tool(call("slow", json!({"message": "three"}))),
-    )
-    .await;
-    ensure!(
-        third.is_err(),
-        "the third call got a slot and is running: {third:?}"
-    );
+    // The cancelled run let go of its slot: this call is not busy, so it
+    // runs and enters the tool (it never returns, so it cannot finish first).
+    let third = client.call_tool(call("slow", json!({"message": "three"})));
+    tokio::pin!(third);
+    tokio::select! {
+        result = &mut third => {
+            anyhow::bail!("the third call got no slot and returned: {result:?}");
+        }
+        entries = entered_times(&mut entered, 2) => entries?,
+    }
     Ok(())
 }
 
 #[tokio::test]
 async fn a_run_past_its_time_is_stopped() -> anyhow::Result<()> {
     let server = McpServer::new("test")
-        .agent(hanging_agent(1))
+        .agent(hanging_agent(1, Hang::new().0))
         .max_run_duration(std::time::Duration::from_millis(300));
     let (client, _) = connect(server).await?;
     let result = client
