@@ -53,31 +53,45 @@ stop() {
   wait "$SERVER_PID" 2>/dev/null || true
 }
 
+# Run one command, keep stdout and stderr, and require a marker line the example
+# prints when it does its work. On failure, print the captured output.
+expect_marker() {
+  local name=$1 marker=$2 out="$WORK/$1.out"
+  shift 2
+  if ! "$@" >"$out" 2>&1; then
+    cat "$out" >&2
+    fail "$name exited non-zero"
+  fi
+  if ! grep -qF -- "$marker" "$out"; then
+    cat "$out" >&2
+    fail "$name output lacks marker: $marker"
+  fi
+}
+
 step "build every example once"
 timeout 900 cargo build --workspace --examples --all-features
 
 step "rig-a2a remote_tool (in-process A2A server, scripted models)"
-timeout 120 "$BIN/remote_tool" >"$WORK/remote_tool.out"
-grep -q "According to the Harbor Library desk" "$WORK/remote_tool.out" || fail "remote_tool reply"
+expect_marker remote_tool "According to the Harbor Library desk" timeout 120 "$BIN/remote_tool"
 ok "remote_tool"
 
 step "rig-a2a a2a_echo_server + call"
 PORT=3300 serve a2a_echo "$BIN/a2a_echo_server"
 wait_for http://127.0.0.1:3300/.well-known/agent-card.json
-timeout 60 "$BIN/call" http://127.0.0.1:3300 "Hi" --expect pong >/dev/null
+expect_marker call "pong" timeout 60 "$BIN/call" http://127.0.0.1:3300 "Hi" --expect pong
 stop
 ok "a2a_echo_server answers pong"
 
 step "rig-evals evals"
-timeout 300 "$BIN/evals" >/dev/null
+expect_marker evals "JUnit written to" timeout 300 "$BIN/evals"
 ok "evals"
 
 step "rig-multiagent swarm_graph"
-timeout 120 "$BIN/swarm_graph" >/dev/null
+expect_marker swarm_graph "join check: the report got both branches" timeout 120 "$BIN/swarm_graph"
 ok "swarm_graph"
 
 step "rig-otel console"
-timeout 120 "$BIN/console" >/dev/null
+expect_marker console "callee: Hello back from the other service." timeout 120 "$BIN/console"
 ok "console"
 
 step "rig-agentcore serve (GET /ping, POST /invocations)"
